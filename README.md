@@ -9,6 +9,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 - **Never silent, never overlapping** — one playback queue; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
 - **Menu bar control** — on/off, voice (30 options), speed, "final answer: full or summary only", stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
 - Code blocks, URLs, emojis and file paths are cleaned up before speaking.
+- **Plan usage at the end** — after each final answer it says the remaining % of your plan: weekly for Claude Code and Codex, monthly for Cursor (just the number, e.g. "65"). Turn off with `"falar_limite": false`.
 
 ## Requirements
 
@@ -71,6 +72,8 @@ agent hook ──► tts.py hook ──► queue (~/.tts-agentes/fila) ──►
 | Codex | `PostToolUse` hook reads the rollout transcript | `Stop` hook |
 | Cursor | — | `afterAgentResponse` hook |
 
+Claude Code's desktop app saves some progress notes as "narration" blocks; those are read too, while real reasoning blocks never are.
+
 Long texts are split into ~1500-character parts and streamed back to back. Gemini rate limits (HTTP 429) pause Gemini automatically and the fallback voice is used meanwhile; the menu shows it.
 
 ## Configuration
@@ -84,6 +87,7 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 | `final` | `completa` | `completa` or `resumo` |
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
 | `max_caracteres` | `3000` | Longer texts are cut at a sentence boundary |
+| `falar_limite` | `true` | Say the remaining plan % after final answers |
 | `silencio_inicial_ms` | `600` | Silence played before each utterance so the speakers wake up and the first word isn't swallowed |
 | `estilo` | PT-BR style prompt | Instruction sent to Gemini (language, pace, pronunciation) |
 | `voz_reserva` | `pt-BR-ThalitaMultilingualNeural` | Microsoft fallback voice (`edge-tts --list-voices`) |

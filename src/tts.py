@@ -58,7 +58,8 @@ PADRAO = {
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
     "final": "completa",     # "completa" ou "resumo" (só o primeiro parágrafo da resposta final)
     "max_caracteres": 3000,
-    "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
+    "silencio_inicial_ms": 600,
+    "falar_limite": True,        # no fim da resposta final, fala o % restante do plano (semana ou mês)  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
     "voz_offline": "Luciana",
 }
@@ -612,13 +613,26 @@ def ler_cauda(caminho: str, max_bytes: int = 2_000_000) -> list[dict]:
     return entradas
 
 
+def e_narracao(bloco: dict) -> bool:
+    """O app desktop grava parte das mensagens intermediárias como bloco "thinking" marcado
+    como narração na assinatura. Raciocínio de verdade vem marcado como "thinking"."""
+    if bloco.get("type") != "thinking" or not bloco.get("thinking", "").strip():
+        return False
+    try:
+        assinatura = bloco.get("signature", "")
+        return b"narration" in base64.b64decode(assinatura + "=" * (-len(assinatura) % 4))[:80]
+    except ValueError:
+        return False
+
+
 def textos_turno_claude(caminho: str) -> list[str]:
     """Blocos de texto do assistente no turno atual (desde a última mensagem real do usuário)."""
     textos: list[str] = []
     for e in reversed(ler_cauda(caminho)):
         conteudo = (e.get("message") or {}).get("content")
         if e.get("type") == "assistant" and isinstance(conteudo, list):
-            textos = [c.get("text", "") for c in conteudo if c.get("type") == "text"] + textos
+            textos = [c.get("text", "") if c.get("type") == "text" else c.get("thinking", "")
+                      for c in conteudo if c.get("type") == "text" or e_narracao(c)] + textos
         elif e.get("type") == "user" and not e.get("isMeta"):
             if isinstance(conteudo, str) or (isinstance(conteudo, list) and any(
                     c.get("type") == "text" for c in conteudo)):
@@ -704,6 +718,8 @@ def hook(origem: str, evento: str) -> None:
     for t in novos:
         e_final = t is final
         falar = resumo(t) if e_final and modo == "resumo" else t
+        if e_final:
+            falar = com_limite(falar, origem, transcript)
         log(f"hook origem={origem} evento={evento} final={e_final} modo={modo if e_final else '-'} "
             f"chars={len(t)}->{len(falar)}")
         enfileirar(falar)
@@ -813,9 +829,105 @@ def falar_agora() -> str:
     ts, origem, texto = achado
     parar()
     falar = resumo(texto) if ler_config()["final"] == "resumo" else texto
+    falar = com_limite(falar, origem.split()[0])
     log(f"agora origem={origem} chars={len(texto)}->{len(falar)}")
     enfileirar(falar)
     return f"Lendo a última resposta do {origem.capitalize()} ({time.strftime('%H:%M', time.localtime(ts))})."
+
+
+# ---------------------------------------------------------------- limite do plano
+
+def _restante(usado: float | None, reseta_em: float | None) -> int | None:
+    if usado is None:
+        return None
+    if reseta_em and time.time() > reseta_em:
+        return 100  # a janela já renovou desde a última leitura
+    return max(0, min(100, round(100 - usado)))
+
+
+def restante_claude() -> int | None:
+    """Semana do plano. Fontes, fica com a mais recente: o histórico de uso que o app desktop
+    grava e a barra de status do Claude Code no terminal (tts statusline)."""
+    leituras = []
+    try:
+        d = json.loads((Path.home() / "Library/Application Support/Claude/plan-usage-history.json").read_text())
+        amostra = max(d.get("samples", []), key=lambda a: a.get("t", 0))
+        if amostra.get("u", {}).get("sd") is not None:
+            leituras.append((amostra["t"] / 1000, amostra["u"]["sd"], None))
+    except (OSError, ValueError):
+        pass
+    try:
+        d = json.loads((BASE / "limites-claude.json").read_text())
+        semana = (d.get("rate_limits") or {}).get("seven_day") or {}
+        if semana.get("used_percentage") is not None:
+            leituras.append((d["ts"], semana["used_percentage"], semana.get("resets_at")))
+    except (OSError, ValueError, KeyError):
+        pass
+    if not leituras:
+        return None
+    ts, usado, reseta = max(leituras, key=lambda l: l[0])
+    if time.time() - ts > 12 * 3600:
+        return None  # velho demais para confiar
+    return _restante(usado, reseta)
+
+
+def restante_codex(transcript: str = "") -> int | None:
+    """Semana do plano, gravada pelo próprio Codex nos eventos token_count da sessão."""
+    arq = Path(transcript) if transcript and Path(transcript).exists() else \
+        mais_recente("~/.codex/sessions/*/*/*/*.jsonl")
+    if not arq:
+        return None
+    for e in reversed(ler_cauda(str(arq))):
+        limites = (e.get("payload") or {}).get("rate_limits")
+        if not limites:
+            continue
+        for janela in (limites.get("primary"), limites.get("secondary")):
+            if janela and janela.get("window_minutes") == 10080:
+                return _restante(janela.get("used_percent"), janela.get("resets_at"))
+        return None
+    return None
+
+
+def restante_cursor() -> int | None:
+    """Mês do plano, pelo mesmo resumo que o painel do Cursor usa (cache de 5 minutos)."""
+    cache = BASE / "limites-cursor.json"
+    try:
+        d = json.loads(cache.read_text())
+        if time.time() - d["ts"] < 300:
+            return d["restante"]
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        import sqlite3
+        db = Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        token = con.execute("select value from ItemTable where key='cursorAuth/accessToken'").fetchone()[0]
+        corpo = token.split(".")[1]
+        uid = json.loads(base64.urlsafe_b64decode(corpo + "=" * (-len(corpo) % 4)))["sub"].split("|")[-1]
+        req = urllib.request.Request("https://cursor.com/api/usage-summary",
+                                     headers={"Cookie": f"WorkosCursorSessionToken={uid}%3A%3A{token}"})
+        resumo = json.loads(urllib.request.urlopen(req, timeout=4).read())
+        plano = (resumo.get("individualUsage") or {}).get("plan") or {}
+        fim = para_epoch(resumo.get("billingCycleEnd"), 0)
+        restante = _restante(plano.get("totalPercentUsed"), fim or None)
+    except Exception as e:
+        log(f"limite cursor: {str(e)[:150]}")
+        return None
+    cache.write_text(json.dumps({"ts": time.time(), "restante": restante}))
+    return restante
+
+
+def com_limite(texto: str, origem: str, transcript: str = "") -> str:
+    """Acrescenta o número no fim da fala (só o número, ex.: 65)."""
+    if not ler_config().get("falar_limite", True):
+        return texto
+    try:
+        n = {"claude": restante_claude, "cursor": restante_cursor}.get(origem, lambda: None)() \
+            if origem != "codex" else restante_codex(transcript)
+    except Exception as e:
+        log(f"limite {origem}: {e}")
+        n = None
+    return f"{texto.rstrip()}\n\n{n}." if n is not None else texto
 
 
 # ---------------------------------------------------------------- CLI
@@ -881,6 +993,13 @@ def main() -> None:
     elif cmd == "repetir":
         if not repetir_ultimo():
             sys.exit("Nada para repetir ainda.")
+    elif cmd == "statusline":  # barra de status do Claude Code: guarda os limites do plano
+        dados = json.loads(sys.stdin.read() or "{}")
+        if dados.get("rate_limits"):
+            (BASE / "limites-claude.json").write_text(json.dumps(
+                {"ts": time.time(), "rate_limits": dados["rate_limits"]}))
+        semana = ((dados.get("rate_limits") or {}).get("seven_day") or {}).get("used_percentage")
+        print(f"semana: {100 - round(semana)}% restante" if semana is not None else "")
     elif cmd == "autoteste":
         import autoteste
         sys.exit(0 if autoteste.main() else 1)

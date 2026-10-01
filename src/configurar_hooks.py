@@ -65,6 +65,15 @@ def main(acao: str) -> None:
     def codex(evento):
         return {"hooks": [{"type": "command", "command": comando("codex", evento), "timeout": 10}]}
 
+    claude_cfg = HOME / ".claude/settings.json"
+    dados = ler(claude_cfg)
+    nossa = {"type": "command", "command": f"{BASE}/.venv/bin/python {BASE}/tts.py statusline"}
+    if instalar and "statusLine" not in dados:  # barra de status do terminal: lê o limite semanal
+        dados["statusLine"] = nossa
+        gravar(claude_cfg, dados)
+    elif not instalar and MARCA in json.dumps(dados.get("statusLine", "")):
+        dados.pop("statusLine")
+        gravar(claude_cfg, dados)
     configurar(HOME / ".claude/settings.json", {
         "Stop": claude("stop"),
         "PostToolUse": {"matcher": "*", **claude("tool")},
