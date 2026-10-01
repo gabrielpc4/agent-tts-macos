@@ -18,7 +18,7 @@ chmod +x "$BASE/salvar_chave.sh"
 
 echo "→ Criando o ambiente Python (edge-tts, rumps, sounddevice, quickmachotkey)"
 [[ -x "$BASE/.venv/bin/python" ]] || python3 -m venv "$BASE/.venv"
-"$BASE/.venv/bin/pip" install -q --upgrade edge-tts rumps sounddevice quickmachotkey
+"$BASE/.venv/bin/pip" install -q --upgrade edge-tts rumps sounddevice quickmachotkey pyobjc-framework-ApplicationServices pyobjc-framework-Quartz
 
 echo "→ Comando 'tts' em ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
@@ -73,4 +73,5 @@ else
   echo "    (sem chave, a voz usada é a da Microsoft, grátis)"
 fi
 echo "  • No Codex, aprove os hooks novos com /hooks."
+echo "  • Para o Falar seleção (⌥Esc), libere o Python em Ajustes > Privacidade e Segurança > Acessibilidade."
 echo "  • Teste: tts testar   ·   Diagnóstico completo: tts autoteste"

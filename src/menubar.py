@@ -9,7 +9,7 @@ from pathlib import Path
 import AppKit
 import rumps
 from quickmachotkey import mask, quickHotKey
-from quickmachotkey.constants import kVK_ANSI_P, optionKey
+from quickmachotkey.constants import kVK_ANSI_P, kVK_Escape, optionKey
 
 import tts
 
@@ -63,6 +63,7 @@ class App(rumps.App):
             self.menu_modelo.add(item)
 
         self.menu = [
+            rumps.MenuItem("Falar seleção  (⌥Esc)", callback=self.falar_selecao),
             rumps.MenuItem("Pausar / continuar  (⌥P)", callback=self.pausar),
             rumps.MenuItem("Falar agora", callback=self.falar_agora),
             self.item_ativo,
@@ -160,6 +161,9 @@ class App(rumps.App):
     def repetir(self, _):
         threading.Thread(target=tts.repetir_ultimo, daemon=True).start()
 
+    def falar_selecao(self, _):
+        threading.Thread(target=tts.falar_selecao, daemon=True).start()
+
     def pausar(self, _):
         threading.Thread(target=tts.alternar_pausa, daemon=True).start()
 
@@ -183,7 +187,16 @@ def atalho_pausa() -> None:
     threading.Thread(target=tts.alternar_pausa, daemon=True).start()
 
 
+@quickHotKey(virtualKey=kVK_Escape, modifierMask=mask(optionKey))
+def atalho_selecao() -> None:
+    """⌥Esc em qualquer app: lê a seleção com a voz da ferramenta (ou para, se já estiver falando)."""
+    threading.Thread(target=tts.falar_selecao, daemon=True).start()
+
+
 if __name__ == "__main__":
+    import ApplicationServices
+    if not ApplicationServices.AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True}):
+        tts.log("menubar sem permissão de acessibilidade: Falar seleção vai pedir no primeiro uso")
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
         AppKit.NSApplicationActivationPolicyAccessory)  # sem ícone no Dock
     App().run()

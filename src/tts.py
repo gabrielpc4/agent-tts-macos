@@ -10,6 +10,7 @@ Comandos:
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
   tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
+  tts selecao              lê o texto selecionado no app em foco (atalho global: ⌥Esc)
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
@@ -1064,6 +1065,83 @@ def com_limite(texto: str, origem: str, transcript: str = "") -> str:
     return f"{texto.rstrip()}\n\n{n}." if n is not None else texto
 
 
+# ---------------------------------------------------------------- falar seleção
+
+def _selecao_por_acessibilidade() -> str:
+    """Lê a seleção direto do app em foco, sem tocar na área de transferência."""
+    import ApplicationServices as AS
+    from AppKit import NSWorkspace
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if not app:
+        return ""
+    # pedir o foco ao app em primeiro plano funciona onde o "foco do sistema" falha (erro -25204)
+    elemento = AS.AXUIElementCreateApplication(app.processIdentifier())
+    erro, foco = AS.AXUIElementCopyAttributeValue(elemento, AS.kAXFocusedUIElementAttribute, None)
+    if erro or not foco:
+        return ""
+    erro, texto = AS.AXUIElementCopyAttributeValue(foco, AS.kAXSelectedTextAttribute, None)
+    return str(texto) if not erro and texto else ""
+
+
+def _selecao_por_copia() -> str:
+    """Reserva para apps que não expõem a seleção: ⌘C, lê e devolve a área de transferência."""
+    import Quartz
+    from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
+    pb = NSPasteboard.generalPasteboard()
+    guardado = [{t: item.dataForType_(t) for t in item.types()} for item in (pb.pasteboardItems() or [])]
+    contagem = pb.changeCount()
+    fonte = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    for apertado in (True, False):
+        evento = Quartz.CGEventCreateKeyboardEvent(fonte, 8, apertado)  # tecla C
+        Quartz.CGEventSetFlags(evento, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, evento)
+    for _ in range(25):
+        if pb.changeCount() != contagem:
+            break
+        time.sleep(0.02)
+    texto = pb.stringForType_(NSPasteboardTypeString) if pb.changeCount() != contagem else ""
+    if pb.changeCount() != contagem:  # devolve o que estava antes
+        pb.clearContents()
+        itens = []
+        for tipos in guardado:
+            novo = NSPasteboardItem.alloc().init()
+            for tipo, dados in tipos.items():
+                if dados is not None:
+                    novo.setData_forType_(dados, tipo)
+            itens.append(novo)
+        if itens:
+            pb.writeObjects_(itens)
+    return str(texto or "")
+
+
+def texto_selecionado() -> str:
+    try:
+        texto = _selecao_por_acessibilidade()
+    except Exception as e:
+        log(f"seleção por acessibilidade: {e}")
+        texto = ""
+    if texto.strip():
+        return texto
+    try:
+        return _selecao_por_copia()
+    except Exception as e:
+        log(f"seleção por cópia: {e}")
+        return ""
+
+
+def falar_selecao() -> str:
+    """Como o 'Falar seleção' do macOS: se já está falando, para; senão, lê o texto selecionado."""
+    if worker_ativo():
+        parar()
+        return "parado"
+    texto = texto_selecionado()
+    if not texto.strip():
+        return "nada selecionado"
+    log(f"seleção chars={len(texto)}")
+    enfileirar(texto)
+    return "lendo a seleção"
+
+
 # ---------------------------------------------------------------- CLI
 
 def status(cfg: dict) -> None:
@@ -1124,6 +1202,8 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
+    elif cmd == "selecao":
+        print(falar_selecao().capitalize() + ".")
     elif cmd == "pausa":
         print(alternar_pausa().capitalize() + ".")
     elif cmd == "parar":

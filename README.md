@@ -6,6 +6,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 
 - **Natural, code-switching voice** — Google Gemini TTS, steered by a style prompt ("pronounce English terms like a native").
 - **Starts in ~2 seconds**, even for long answers: audio is streamed and played as it arrives.
+- **Speak selection with ⌥Esc** — like macOS Speak Selection, but with this app's voice and settings; press again to stop.
 - **Pause anywhere with ⌥P** — a global shortcut pauses and resumes exactly where it stopped.
 - **Never silent, never overlapping** — one playback queue and one audio output; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
 - **Menu bar control** — on/off, voice (30 options), speed, final answers only or with progress notes, stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
@@ -47,6 +48,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 
 | Item | What it does |
 |---|---|
+| Falar seleção (⌥Esc) | Reads the selected text in the frontmost app with this voice; again to stop. Needs Accessibility permission for Python |
 | Pausar / continuar (⌥P) | Pause and resume from the exact point; ⌥P works in any app |
 | Falar agora (Speak now) | Reads the most recent final answer from Claude Code, Codex or Cursor, even with reading turned off |
 | Leitura ligada | Turns automatic reading on/off |
@@ -57,7 +59,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Velocidade | 1.0x–2.0x extra speed on top of the "fast" pace requested from Gemini (pitch preserved) |
 | Modelo Gemini | Flash (best) or Flash-Lite (cheaper) |
 
-Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts intermediarias off`, `tts agora`, `tts pausa`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
+Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts intermediarias off`, `tts agora`, `tts selecao`, `tts pausa`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
 
 ## How it works
 
