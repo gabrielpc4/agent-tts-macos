@@ -9,6 +9,7 @@ Comandos:
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
+  tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥F)
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
   tts repetir              repete a última fala (já com a velocidade atual, sem chamar a API)
@@ -176,7 +177,6 @@ def binario(nome: str) -> str:
     return nome
 
 
-FFPLAY = binario("ffplay")
 FFMPEG = binario("ffmpeg")
 SEGMENTO_MAX = 3000  # caracteres por pedido ao Gemini (a cota é por pedido, então menos pedidos é melhor)
 
@@ -377,40 +377,123 @@ class Item:
             self.pedacos.put(None)
 
 
-RESERVA_INICIAL = 24000          # bytes de PCM (0,5 s) acumulados antes de abrir o player
-RESPIRO_FINAL = bytes(12000)     # 0,25 s de silêncio para o player não cortar a última sílaba
+RESERVA_INICIAL = 24000          # bytes de PCM (0,5 s) juntados antes de começar uma fala com o buffer vazio
+TAXA, BYTES_POR_SEG = 24000, 48000
+PAUSADO = BASE / "pausado"
 
 
-def filtros(velocidade: float) -> list[str]:
-    """Velocidade extra e um silêncio de entrada, para o alto-falante acordar antes da fala."""
-    partes = [f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
-    if (atraso := int(ler_config().get("silencio_inicial_ms", 600))) > 0:
-        partes.append(f"adelay={atraso}:all=1")
-    return ["-af", ",".join(partes)] if partes else []
+class Saida:
+    """Saída de áudio única do worker (PCM 24 kHz, mono). Fica aberta entre as falas, então o
+    alto-falante só precisa acordar uma vez. Pausada, entrega silêncio sem avançar no áudio."""
+
+    def __init__(self):
+        self.buffer, self.trava = bytearray(), threading.Lock()
+        self.vazio = threading.Event()
+        self.vazio.set()
+        self.pausado = False
+        self.arquivo = None
+        self.stream = None
+        threading.Thread(target=self._vigiar_pausa, daemon=True).start()
+        if not os.environ.get("TTS_SINK_DIR"):
+            import sounddevice as sd
+            self.stream = sd.RawOutputStream(samplerate=TAXA, channels=1, dtype="int16",
+                                             blocksize=1200, callback=self._callback)
+            self.stream.start()
+            atraso = int(ler_config().get("silencio_inicial_ms", 600))
+            self.escrever(bytes(atraso * BYTES_POR_SEG // 1000 // 2 * 2))  # acorda o alto-falante
+
+    def _vigiar_pausa(self) -> None:
+        while True:
+            self.pausado = PAUSADO.exists()
+            time.sleep(0.05)
+
+    def _callback(self, saida, frames, tempo, status) -> None:
+        n = frames * 2
+        with self.trava:
+            if self.pausado:
+                pedaco = b""
+            else:
+                pedaco = bytes(self.buffer[:n])
+                del self.buffer[:n]
+            if not self.buffer:
+                self.vazio.set()
+        saida[:len(pedaco)] = pedaco
+        saida[len(pedaco):] = bytes(n - len(pedaco))
+
+    def nova_fala(self) -> None:
+        """Nos testes, cada fala vira um arquivo .wav separado."""
+        if destino := os.environ.get("TTS_SINK_DIR"):
+            self.fechar_arquivo()
+            self.arquivo = wave.open(str(Path(destino) / f"{time.time_ns()}.wav"), "wb")
+            self.arquivo.setnchannels(1)
+            self.arquivo.setsampwidth(2)
+            self.arquivo.setframerate(TAXA)
+
+    def escrever(self, dados: bytes) -> None:
+        if self.arquivo:
+            self.arquivo.writeframes(dados)
+            return
+        with self.trava:
+            self.buffer += dados
+            if self.buffer:
+                self.vazio.clear()
+
+    def vazia(self) -> bool:
+        return self.arquivo is not None or self.vazio.is_set()
+
+    def esperar_esvaziar(self) -> None:
+        if self.stream:
+            self.vazio.wait()
+            time.sleep(self.stream.latency + 0.05)  # o que já foi entregue ao alto-falante
+
+    def fechar_arquivo(self) -> None:
+        if self.arquivo:
+            self.arquivo.close()
+            self.arquivo = None
+
+    def fechar(self) -> None:
+        self.esperar_esvaziar()
+        self.fechar_arquivo()
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
 
 
-def abrir_player(formato: str, velocidade: float) -> subprocess.Popen:
-    entrada = (["-f", "s16le", "-sample_rate", "24000", "-ch_layout", "mono"]
-               if formato == "pcm" else ["-f", "mp3"])
-    filtro = filtros(velocidade)
-    if destino_teste := os.environ.get("TTS_SINK_DIR"):  # testes: grava em vez de tocar
-        saida = Path(destino_teste) / f"{time.time_ns()}.wav"
-        comando = [FFMPEG, "-loglevel", "quiet", "-y", *entrada,
-                   "-i", "pipe:0", *filtro, str(saida)]
-    else:
-        comando = [FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet",
-                   *entrada, "-i", "pipe:0", *filtro]
-    return subprocess.Popen(comando, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+class Conversor:
+    """Passa o áudio pelo ffmpeg quando precisa (MP3 da voz reserva, arquivo, velocidade extra)
+    e entrega PCM pronto para a Saida."""
 
+    def __init__(self, formato: str, velocidade: float, saida: Saida, arquivo: Path | None = None):
+        entrada = (["-i", str(arquivo)] if arquivo else
+                   ["-f", "s16le", "-sample_rate", str(TAXA), "-ch_layout", "mono", "-i", "pipe:0"]
+                   if formato == "pcm" else ["-f", "mp3", "-i", "pipe:0"])
+        filtro = ["-af", f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
+        self.formato = formato
+        self.proc = subprocess.Popen([FFMPEG, "-loglevel", "quiet", *entrada, *filtro,
+                                      "-f", "s16le", "-ar", str(TAXA), "-ac", "1", "pipe:1"],
+                                     stdin=subprocess.DEVNULL if arquivo else subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.leitor = threading.Thread(target=self._ler, args=(saida,), daemon=True)
+        self.leitor.start()
 
-def fechar_player(player: subprocess.Popen | None) -> None:
-    if player:
+    def _ler(self, saida: Saida) -> None:
+        while dados := self.proc.stdout.read(4800):
+            saida.escrever(dados)
+
+    def escrever(self, dados: bytes) -> None:
         try:
-            player.stdin.close()
+            self.proc.stdin.write(dados)
         except BrokenPipeError:
-            pass
-        player.wait()
+            log("conversor fechou antes do fim do áudio")
+
+    def fechar(self) -> None:
+        if self.proc.stdin:
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        self.leitor.join()
+        self.proc.wait()
 
 
 def salvar_ultimo(gravado: dict) -> None:
@@ -423,56 +506,52 @@ def salvar_ultimo(gravado: dict) -> None:
         with wave.open(str(ULTIMO.with_suffix(".wav")), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
-            w.setframerate(24000)
+            w.setframerate(TAXA)
             w.writeframes(bytes(gravado["pcm"]))
     else:
         ULTIMO.with_suffix(".mp3").write_bytes(bytes(gravado["mp3"]))
 
 
-def tocar_item(item: Item) -> None:
-    """Toca uma fala conforme o áudio chega. Um único player por vez, sempre neste worker."""
+def tocar_item(item: Item, saida: Saida) -> None:
+    """Entrega uma fala à saída conforme o áudio chega do gerador."""
     velocidade = ler_config()["velocidade"]
-    player, formato_atual, pendente = None, None, bytearray()
+    direto = abs(velocidade - 1.0) <= 0.01
+    conversor, pendente, primeiro = None, bytearray(), None
+    reserva = RESERVA_INICIAL if saida.vazia() else 0  # buffer vazio: junta meio segundo antes
     gravado = {"pcm": bytearray(), "mp3": bytearray()}
-
-    def escrever(dados: bytes) -> bool:
-        try:
-            player.stdin.write(dados)
-            return True
-        except BrokenPipeError:
-            log("player fechou antes do fim do áudio")
-            return False
-
+    saida.nova_fala()
     while (pedaco := item.pedacos.get()) is not None:
         formato, dados = pedaco
         gravado[formato] += dados
-        if formato != formato_atual:
-            if player is None and pendente:  # troca de voz antes de encher a reserva
-                player = abrir_player(formato_atual, velocidade)
-                escrever(bytes(pendente))
-            if player:
-                if formato_atual == "pcm":
-                    escrever(RESPIRO_FINAL)
-                fechar_player(player)
-                player = None
-            formato_atual, pendente = formato, bytearray()
-        if player is None:
+        if primeiro is None:
             pendente += dados
-            if formato == "pcm" and len(pendente) < RESERVA_INICIAL:
-                continue  # meio segundo de reserva evita engasgos no começo
-            player = abrir_player(formato, velocidade)
-            log(f"tocando chars={len(item.limpo)} primeiro_audio_em="
-                f"{time.time() - item.enfileirado_em:.1f}s")
-            dados, pendente = bytes(pendente), bytearray()
-        if not escrever(dados):
-            break
-    if player is None and pendente:  # fala curta: o stream acabou antes de encher a reserva
-        player = abrir_player(formato_atual, velocidade)
+            if formato == "pcm" and len(pendente) < reserva:
+                continue
+            primeiro = time.time()
+            log(f"tocando chars={len(item.limpo)} primeiro_audio_em={primeiro - item.enfileirado_em:.1f}s")
+            dados = bytes(pendente)
+        if formato == "pcm" and direto:
+            if conversor:
+                conversor.fechar()
+                conversor = None
+            saida.escrever(dados)
+            continue
+        if not conversor or conversor.formato != formato:
+            if conversor:
+                conversor.fechar()
+            conversor = Conversor(formato, velocidade, saida)
+        conversor.escrever(dados)
+    if primeiro is None and pendente:  # fala curta: acabou antes de encher a reserva
         log(f"tocando chars={len(item.limpo)} primeiro_audio_em={time.time() - item.enfileirado_em:.1f}s")
-        escrever(bytes(pendente))
-    if player and formato_atual == "pcm":
-        escrever(RESPIRO_FINAL)
-    fechar_player(player)
+        if direto:
+            saida.escrever(bytes(pendente))
+        else:
+            conversor = Conversor("pcm", velocidade, saida)
+            conversor.escrever(bytes(pendente))
+    if conversor:
+        conversor.fechar()
+    saida.esperar_esvaziar()
+    saida.fechar_arquivo()
     log(f"fim motor={item.motor} chars={len(item.limpo)} total={time.time() - item.enfileirado_em:.1f}s")
     salvar_ultimo(gravado)
 
@@ -484,23 +563,16 @@ class ItemArquivo:
         self.caminho, self.enfileirado_em = caminho, enfileirado_em
 
 
-def tocar(item) -> None:
+def tocar(item, saida: Saida) -> None:
     if isinstance(item, ItemArquivo):
         log(f"repetindo {item.caminho.name}")
-        tocar_arquivo(item.caminho, ler_config()["velocidade"])
+        saida.nova_fala()
+        Conversor("arquivo", ler_config()["velocidade"], saida, arquivo=item.caminho).fechar()
+        saida.esperar_esvaziar()
+        saida.fechar_arquivo()
         item.caminho.unlink(missing_ok=True)
     else:
-        tocar_item(item)
-
-
-def tocar_arquivo(arquivo: Path, velocidade: float) -> None:
-    filtro = filtros(velocidade)
-    if destino_teste := os.environ.get("TTS_SINK_DIR"):
-        comando = [FFMPEG, "-loglevel", "quiet", "-y", "-i", str(arquivo),
-                   *filtro, str(Path(destino_teste) / f"{time.time_ns()}-repetir.wav")]
-    else:
-        comando = [FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", str(arquivo), *filtro]
-    subprocess.run(comando, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        tocar_item(item, saida)
 
 
 def repetir_ultimo() -> bool:
@@ -527,10 +599,32 @@ def worker_ativo() -> int | None:
         return None
 
 
+def pausar() -> bool:
+    """A saída para no ponto exato e entrega silêncio; o resto da fala segue sendo gerado."""
+    if not worker_ativo():
+        return False  # nada falando: não deixa uma pausa "armada" que travaria a próxima fala
+    PAUSADO.touch()
+    log("pausado")
+    return True
+
+
+def continuar() -> None:
+    PAUSADO.unlink(missing_ok=True)
+    log("continuando")
+
+
+def alternar_pausa() -> str:
+    if PAUSADO.exists():
+        continuar()
+        return "continuando"
+    return "pausado" if pausar() else "nada tocando"
+
+
 def parar() -> bool:
     """Limpa a fila e interrompe a fala atual (espera o worker sair, para não perder o lock)."""
     for item in FILA.glob("*"):
         item.unlink(missing_ok=True)
+    PAUSADO.unlink(missing_ok=True)
     pid = worker_ativo()
     if pid:
         try:
@@ -599,7 +693,9 @@ def worker() -> None:
                 time.sleep(0.1)
 
     threading.Thread(target=alimentar, daemon=True).start()
+    saida = None
     try:
+        saida = Saida()
         while True:
             try:
                 item = prontos.get(timeout=2)
@@ -609,11 +705,13 @@ def worker() -> None:
                         encerrar.set()
                         break
                 continue
-            tocar(item)
+            tocar(item, saida)
     except Exception as e:
         log(f"erro no worker: {e}")
     finally:
         encerrar.set()
+        if saida:
+            saida.fechar()
         PIDFILE.unlink(missing_ok=True)
         fcntl.flock(lock, fcntl.LOCK_UN)
         if any(FILA.glob("*.txt")) or any(FILA.glob("*.ref")):  # chegou algo enquanto saíamos
@@ -1002,6 +1100,8 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
+    elif cmd == "pausa":
+        print(alternar_pausa().capitalize() + ".")
     elif cmd == "parar":
         print("Parado." if parar() else "Nada tocando.")
     elif cmd == "repetir":

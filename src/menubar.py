@@ -8,10 +8,12 @@ from pathlib import Path
 
 import AppKit
 import rumps
+from quickmachotkey import mask, quickHotKey
+from quickmachotkey.constants import kVK_ANSI_F, optionKey
 
 import tts
 
-ICONE_LIGADO, ICONE_FALANDO, ICONE_DESLIGADO = "🔊", "🗣️", "🔇"
+ICONE_LIGADO, ICONE_FALANDO, ICONE_DESLIGADO, ICONE_PAUSADO = "🔊", "🗣️", "🔇", "⏸️"
 VELOCIDADES = [round(1.0 + i / 10, 1) for i in range(11)]  # 1.0 … 2.0
 MODELOS = {
     "gemini-3.8-flash-tts": "Flash (melhor qualidade)",
@@ -60,7 +62,8 @@ class App(rumps.App):
             self.menu_modelo.add(item)
 
         self.menu = [
-            rumps.MenuItem("Falar agora", callback=self.falar_agora, key="f"),
+            rumps.MenuItem("Pausar / continuar  (⌥F)", callback=self.pausar),
+            rumps.MenuItem("Falar agora", callback=self.falar_agora),
             self.item_ativo,
             self.item_inter,
             rumps.MenuItem("Parar fala", callback=self.parar, key="."),
@@ -97,7 +100,8 @@ class App(rumps.App):
 
     def tique(self, _):
         cfg = tts.ler_config()
-        self.title = ICONE_DESLIGADO if not cfg["ativo"] else ICONE_FALANDO if falando() else ICONE_LIGADO
+        self.title = (ICONE_PAUSADO if tts.PAUSADO.exists() else ICONE_DESLIGADO if not cfg["ativo"]
+                      else ICONE_FALANDO if falando() else ICONE_LIGADO)
         if time.time() < self.aviso_ate:
             self.item_status.title = self.aviso
         elif pausas := [(mod, ate) for mod in tts.MODELOS_GEMINI if (ate := tts.pausa_ate(mod))]:
@@ -150,6 +154,9 @@ class App(rumps.App):
     def repetir(self, _):
         threading.Thread(target=tts.repetir_ultimo, daemon=True).start()
 
+    def pausar(self, _):
+        threading.Thread(target=tts.alternar_pausa, daemon=True).start()
+
     def falar_agora(self, _):
         def buscar():
             self.aviso = tts.falar_agora()
@@ -162,6 +169,12 @@ class App(rumps.App):
     def abrir_log(self, _):
         tts.LOG.touch()
         subprocess.run(["open", "-a", "TextEdit", str(tts.LOG)])
+
+
+@quickHotKey(virtualKey=kVK_ANSI_F, modifierMask=mask(optionKey))
+def atalho_pausa() -> None:
+    """⌥F em qualquer app: pausa ou continua a fala."""
+    threading.Thread(target=tts.alternar_pausa, daemon=True).start()
 
 
 if __name__ == "__main__":

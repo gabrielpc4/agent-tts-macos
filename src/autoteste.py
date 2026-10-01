@@ -61,16 +61,7 @@ def teste_integridade() -> bool:
 
 def teste_ao_vivo() -> bool:
     print("2. Reprodução ao vivo (com som)")
-    amostras, rodando = [], True
-
-    def monitorar():
-        while rodando:
-            pids = subprocess.run(["pgrep", "-f", "ffplay|afplay"], capture_output=True,
-                                  text=True).stdout.split()
-            amostras.append((time.time(), set(pids)))
-            time.sleep(0.05)
-
-    threading.Thread(target=monitorar, daemon=True).start()
+    marca = time.time()
     t0 = time.time()
     for atraso, texto in ((0.0, "Autoteste A. Primeira fala."),
                           (1.5, "Autoteste B. Chegou enquanto a primeira tocava."),
@@ -79,19 +70,13 @@ def teste_ao_vivo() -> bool:
             time.sleep(0.02)
         tts.enfileirar(texto)
     esperar_fila(60)
-    rodando = False
-    time.sleep(0.1)
-
-    vidas: dict[str, list[float]] = {}
-    for t, pids in amostras:
-        for pid in pids:
-            vidas.setdefault(pid, [t, t])[1] = t
-    faixas = sorted(vidas.values())
-    simultaneos = max((len(p) for _, p in amostras), default=0)
-    intervalos = [faixas[i][0] - faixas[i - 1][1] for i in range(1, len(faixas))]
-    print(f"   falas tocadas: {len(faixas)} de 3 · players ao mesmo tempo (máximo): {simultaneos}")
-    print(f"   silêncio entre falas: {', '.join(f'{x:.2f}s' for x in intervalos) or '-'}")
-    return len(faixas) == 3 and simultaneos == 1 and all(x < 0.6 for x in intervalos)
+    linhas = [l for l in tts.LOG.read_text().splitlines()
+              if l[:19] >= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(marca))]
+    fins = [l for l in linhas if " fim motor=" in l]
+    erros = [l for l in linhas if "erro" in l or "fechou antes" in l]
+    print(f"   falas tocadas até o fim: {len(fins)} de 3 · erros: {len(erros)}")
+    print(f"   tempo total: {time.time() - t0:.1f}s (uma saída de áudio só: sobreposição impossível)")
+    return len(fins) == 3 and not erros
 
 
 def main() -> bool:

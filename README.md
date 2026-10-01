@@ -6,7 +6,8 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 
 - **Natural, code-switching voice** — Google Gemini TTS, steered by a style prompt ("pronounce English terms like a native").
 - **Starts in ~2 seconds**, even for long answers: audio is streamed and played as it arrives.
-- **Never silent, never overlapping** — one playback queue; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
+- **Pause anywhere with ⌥F** — a global shortcut pauses and resumes exactly where it stopped.
+- **Never silent, never overlapping** — one playback queue and one audio output; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
 - **Menu bar control** — on/off, voice (30 options), speed, final answers only or with progress notes, stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
 - Code blocks, URLs, emojis and file paths are cleaned up before speaking.
 - **Plan usage at the end** — after each final answer it says the remaining % of your plan: weekly for Claude Code and Codex, monthly for Cursor (just the number, e.g. "65"). Turn off with `"falar_limite": false`.
@@ -46,6 +47,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 
 | Item | What it does |
 |---|---|
+| Pausar / continuar (⌥F) | Pause and resume from the exact point; ⌥F works in any app |
 | Falar agora (Speak now) | Reads the most recent final answer from Claude Code, Codex or Cursor, even with reading turned off |
 | Leitura ligada | Turns automatic reading on/off |
 | Ler passos intermediários | Off = read only final answers, skipping progress notes (`tts intermediarias off`) |
@@ -54,14 +56,14 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Velocidade | 1.0x–2.0x extra speed on top of the "fast" pace requested from Gemini (pitch preserved) |
 | Modelo Gemini | Flash (best) or Flash-Lite (cheaper) |
 
-Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts intermediarias off`, `tts agora`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
+Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts intermediarias off`, `tts agora`, `tts pausa`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
 
 ## How it works
 
 ```
 agent hook ──► tts.py hook ──► queue (~/.tts-agentes/fila) ──► single worker
                 (cleans text,      one file per utterance        ├─ generates the next items ahead
-                 dedupes)                                        ├─ Gemini stream → ffplay (PCM)
+                 dedupes)                                        ├─ Gemini stream → audio output (PCM, pausable)
                                                                  ├─ fallback: Microsoft Edge TTS (MP3)
                                                                  └─ fallback: macOS say
 ```

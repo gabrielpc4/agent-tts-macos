@@ -7,7 +7,7 @@ LABEL="com.tts-agentes.menubar"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 [[ "$(uname)" == Darwin ]] || { echo "Só funciona no macOS."; exit 1; }
-for bin in python3 ffmpeg ffplay; do
+for bin in python3 ffmpeg; do
   command -v $bin >/dev/null || { echo "Falta '$bin'. Instale com: brew install python ffmpeg"; exit 1; }
 done
 
@@ -16,9 +16,9 @@ mkdir -p "$BASE"
 cp src/tts.py src/menubar.py src/autoteste.py src/salvar_chave.sh src/configurar_hooks.py "$BASE/"
 chmod +x "$BASE/salvar_chave.sh"
 
-echo "→ Criando o ambiente Python (edge-tts, rumps)"
+echo "→ Criando o ambiente Python (edge-tts, rumps, sounddevice, quickmachotkey)"
 [[ -x "$BASE/.venv/bin/python" ]] || python3 -m venv "$BASE/.venv"
-"$BASE/.venv/bin/pip" install -q --upgrade edge-tts rumps
+"$BASE/.venv/bin/pip" install -q --upgrade edge-tts rumps sounddevice quickmachotkey
 
 echo "→ Comando 'tts' em ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
