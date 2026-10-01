@@ -9,7 +9,7 @@ Comandos:
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
-  tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥F)
+  tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
   tts repetir              repete a última fala (já com a velocidade atual, sem chamar a API)

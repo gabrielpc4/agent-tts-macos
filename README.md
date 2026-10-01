@@ -6,7 +6,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 
 - **Natural, code-switching voice** — Google Gemini TTS, steered by a style prompt ("pronounce English terms like a native").
 - **Starts in ~2 seconds**, even for long answers: audio is streamed and played as it arrives.
-- **Pause anywhere with ⌥F** — a global shortcut pauses and resumes exactly where it stopped.
+- **Pause anywhere with ⌥P** — a global shortcut pauses and resumes exactly where it stopped.
 - **Never silent, never overlapping** — one playback queue and one audio output; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
 - **Menu bar control** — on/off, voice (30 options), speed, final answers only or with progress notes, stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
 - Code blocks, URLs, emojis and file paths are cleaned up before speaking.
@@ -47,7 +47,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 
 | Item | What it does |
 |---|---|
-| Pausar / continuar (⌥F) | Pause and resume from the exact point; ⌥F works in any app |
+| Pausar / continuar (⌥P) | Pause and resume from the exact point; ⌥P works in any app |
 | Falar agora (Speak now) | Reads the most recent final answer from Claude Code, Codex or Cursor, even with reading turned off |
 | Leitura ligada | Turns automatic reading on/off |
 | Ler passos intermediários | Off = read only final answers, skipping progress notes (`tts intermediarias off`) |

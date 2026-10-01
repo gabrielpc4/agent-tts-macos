@@ -9,7 +9,7 @@ from pathlib import Path
 import AppKit
 import rumps
 from quickmachotkey import mask, quickHotKey
-from quickmachotkey.constants import kVK_ANSI_F, optionKey
+from quickmachotkey.constants import kVK_ANSI_P, optionKey
 
 import tts
 
@@ -62,7 +62,7 @@ class App(rumps.App):
             self.menu_modelo.add(item)
 
         self.menu = [
-            rumps.MenuItem("Pausar / continuar  (⌥F)", callback=self.pausar),
+            rumps.MenuItem("Pausar / continuar  (⌥P)", callback=self.pausar),
             rumps.MenuItem("Falar agora", callback=self.falar_agora),
             self.item_ativo,
             self.item_inter,
@@ -171,9 +171,9 @@ class App(rumps.App):
         subprocess.run(["open", "-a", "TextEdit", str(tts.LOG)])
 
 
-@quickHotKey(virtualKey=kVK_ANSI_F, modifierMask=mask(optionKey))
+@quickHotKey(virtualKey=kVK_ANSI_P, modifierMask=mask(optionKey))
 def atalho_pausa() -> None:
-    """⌥F em qualquer app: pausa ou continua a fala."""
+    """⌥P em qualquer app: pausa ou continua a fala."""
     threading.Thread(target=tts.alternar_pausa, daemon=True).start()
 
 
