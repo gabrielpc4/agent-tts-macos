@@ -50,6 +50,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Pausar / continuar (⌥P) | Pause and resume from the exact point; ⌥P works in any app |
 | Falar agora (Speak now) | Reads the most recent final answer from Claude Code, Codex or Cursor, even with reading turned off |
 | Leitura ligada | Turns automatic reading on/off |
+| Ler subagentes do Codex | Off by default: answers from Codex subagents are ignored (`tts subagentes on`) |
 | Ler passos intermediários | Off = read only final answers, skipping progress notes (`tts intermediarias off`) |
 | Parar fala / Repetir última / Testar voz | Stop, replay (no API cost), sample |
 | Voz | 30 Gemini voices, female and male |

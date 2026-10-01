@@ -9,6 +9,7 @@ Comandos:
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
+  tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
@@ -56,6 +57,7 @@ PADRAO = {
     "voz": "Kore",
     "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
+    "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
     "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
     "max_caracteres": 3000,
     "silencio_inicial_ms": 600,
@@ -765,6 +767,17 @@ def textos_turno_claude(caminho: str) -> list[str]:
     return [t for t in textos if t.strip()]
 
 
+def e_subagente_codex(caminho: str) -> bool:
+    """O cabeçalho da sessão do Codex marca subagentes (thread_source = subagent)."""
+    try:
+        with open(caminho) as f:
+            meta = json.loads(f.readline()).get("payload") or {}
+    except (OSError, ValueError):
+        return False
+    origem = meta.get("source")
+    return meta.get("thread_source") == "subagent" or (isinstance(origem, dict) and "subagent" in origem)
+
+
 def textos_turno_codex(caminho: str) -> list[str]:
     """Mensagens do assistente no turno atual (desde o último task_started)."""
     textos: list[str] = []
@@ -810,6 +823,9 @@ def hook(origem: str, evento: str) -> None:
     if origem in ("codex", "cursor"):
         print("{}")  # Codex exige JSON no stdout; Cursor aceita
         sys.stdout.flush()
+    if origem == "codex" and not ler_config().get("subagentes_codex", False) \
+            and e_subagente_codex(dados.get("transcript_path") or ""):
+        return  # resposta de subagente, não a conversa principal
     if origem == "cursor" or evento == "stop":
         guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
     cfg = ler_config()
@@ -883,7 +899,10 @@ def final_claude() -> tuple[float, str] | None:
 
 
 def final_codex() -> tuple[float, str] | None:
-    arq = mais_recente("~/.codex/sessions/*/*/*/*.jsonl")
+    arquivos = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")),
+                      key=os.path.getmtime, reverse=True)
+    arq = next((Path(a) for a in arquivos[:20] if ler_config().get("subagentes_codex", False)
+                or not e_subagente_codex(a)), None)
     if not arq:
         return None
     for e in reversed(ler_cauda(str(arq))):
@@ -1095,6 +1114,11 @@ def main() -> None:
         cfg["velocidade"] = round(min(2.0, max(1.0, v)), 2)
         salvar_config(cfg)
         print(f"Velocidade: {cfg['velocidade']:.1f}x")
+    elif cmd == "subagentes":
+        if len(a) > 1:
+            cfg["subagentes_codex"] = a[1] in ("on", "sim", "ligar")
+            salvar_config(cfg)
+        print(f"Subagentes do Codex: {'lidos' if cfg.get('subagentes_codex') else 'ignorados'}")
     elif cmd == "intermediarias":
         if len(a) > 1:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")

@@ -6,7 +6,12 @@
 Eu não leio o código gerado nem testo manualmente: quem implementa e verifica é você. Suas mensagens no chat são minha única fonte de entendimento do que foi feito, e eu as ouço em voz alta enquanto você trabalha.
 
 ## Verifique você mesmo
-Ao implementar ou corrigir algo, teste o comportamento de ponta a ponta antes de dizer que terminou. Testar aqui não é teste unitário nem teste de código: é usar o app de verdade, no navegador ou no simulador via Maestro, percorrendo o fluxo que mudou como um usuário faria e conferindo os estados de erro e vazio quando fizerem sentido. Build e testes automatizados ajudam, mas não contam como esse teste.
+Ao implementar ou corrigir algo, teste o comportamento de ponta a ponta antes de dizer que terminou. Testar aqui não é teste unitário nem teste de código: é usar o app de verdade, percorrendo o fluxo que mudou como um usuário faria e conferindo os estados de erro e vazio quando fizerem sentido.
+- Site ou web app: no navegador.
+- App iOS: no Simulador iOS, conduzido pelo Maestro, que já está instalado nesta máquina (`~/.maestro/bin/maestro`). Use um simulador do Device Hub, de preferência o iPhone 17 com a versão mais recente do iOS.
+- Antes de buildar, veja se precisa mesmo. Em React Native, se as dependências nativas não mudaram e o app já está instalado no simulador, basta recarregar o JavaScript, sem build novo.
+
+Build e testes automatizados ajudam, mas não contam como esse teste.
 
 Sempre rode e veja funcionando antes de terminar. Mudança pequena pede um teste mais curto, mas nunca nenhum teste.
 

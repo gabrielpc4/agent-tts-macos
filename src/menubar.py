@@ -36,6 +36,7 @@ class App(rumps.App):
 
         self.item_ativo = rumps.MenuItem("Leitura ligada", callback=self.alternar)
         self.item_inter = rumps.MenuItem("Ler passos intermediários", callback=self.alternar_inter)
+        self.item_sub = rumps.MenuItem("Ler subagentes do Codex", callback=self.alternar_sub)
         self.item_status = rumps.MenuItem("")
 
         self.menu_voz = rumps.MenuItem("Voz")
@@ -66,6 +67,7 @@ class App(rumps.App):
             rumps.MenuItem("Falar agora", callback=self.falar_agora),
             self.item_ativo,
             self.item_inter,
+            self.item_sub,
             rumps.MenuItem("Parar fala", callback=self.parar, key="."),
             rumps.MenuItem("Repetir última", callback=self.repetir, key="r"),
             rumps.MenuItem("Testar voz", callback=self.testar, key="t"),
@@ -88,6 +90,7 @@ class App(rumps.App):
         cfg = cfg or tts.ler_config()
         self.item_ativo.state = int(cfg["ativo"])
         self.item_inter.state = int(cfg.get("intermediarias", True))
+        self.item_sub.state = int(cfg.get("subagentes_codex", False))
         for item in self.menu_voz.values():
             if hasattr(item, "voz"):
                 item.state = int(item.voz == cfg["voz"])
@@ -132,6 +135,9 @@ class App(rumps.App):
 
     def alternar_inter(self, _):
         self.salvar(intermediarias=not tts.ler_config().get("intermediarias", True))
+
+    def alternar_sub(self, _):
+        self.salvar(subagentes_codex=not tts.ler_config().get("subagentes_codex", False))
 
     def trocar_voz(self, item):
         self.salvar(voz=item.voz)
