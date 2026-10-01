@@ -9,7 +9,6 @@ Comandos:
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
-  tts final [completa|resumo]  resposta final inteira ou só o primeiro parágrafo
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
   tts repetir              repete a última fala (já com a velocidade atual, sem chamar a API)
@@ -56,8 +55,7 @@ PADRAO = {
     "voz": "Kore",
     "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
-    "final": "completa",
-    "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho     # "completa" ou "resumo" (só o primeiro parágrafo da resposta final)
+    "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
     "max_caracteres": 3000,
     "silencio_inicial_ms": 600,
     "falar_limite": True,        # no fim da resposta final, fala o % restante do plano (semana ou mês)  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
@@ -706,18 +704,6 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
     return novos
 
 
-def resumo(texto: str) -> str:
-    """Primeiro parágrafo em prosa da resposta (pula títulos, listas, tabelas e código)."""
-    sem_codigo = re.sub(r"```.*?(```|$)", "\n\n", texto, flags=re.S)
-    for bloco in re.split(r"\n\s*\n", sem_codigo):
-        linhas = [l for l in bloco.strip().splitlines() if not re.match(r"\s*#{1,6}\s", l)]
-        prosa = " ".join(l.strip() for l in linhas).strip()
-        if prosa and not re.match(r"^([|>*+-]|\d+[.)]\s)", prosa):
-            return prosa
-    frases = re.split(r"(?<=[.!?])\s+", limpar(texto, 600))
-    return " ".join(frases[:2])
-
-
 def hook(origem: str, evento: str) -> None:
     try:
         dados = json.loads(sys.stdin.read() or "{}")
@@ -747,13 +733,12 @@ def hook(origem: str, evento: str) -> None:
         intermediarias = []
     sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
     novos = so_os_novos(sessao, [t for t in intermediarias + [final] if t.strip()])
-    modo = ler_config()["final"]
     for t in novos:
         e_final = t is final
-        falar = resumo(t) if e_final and modo == "resumo" else t
+        falar = t
         if e_final:
             falar = com_limite(falar, origem, transcript)
-        log(f"hook origem={origem} evento={evento} final={e_final} modo={modo if e_final else '-'} "
+        log(f"hook origem={origem} evento={evento} final={e_final} "
             f"chars={len(t)}->{len(falar)}")
         enfileirar(falar)
 
@@ -861,8 +846,7 @@ def falar_agora() -> str:
         return "Não achei nenhuma resposta final."
     ts, origem, texto = achado
     parar()
-    falar = resumo(texto) if ler_config()["final"] == "resumo" else texto
-    falar = com_limite(falar, origem.split()[0])
+    falar = com_limite(texto, origem.split()[0])
     log(f"agora origem={origem} chars={len(texto)}->{len(falar)}")
     enfileirar(falar)
     return f"Lendo a última resposta do {origem.capitalize()} ({time.strftime('%H:%M', time.localtime(ts))})."
@@ -969,7 +953,6 @@ def status(cfg: dict) -> None:
     print(f"Leitura:    {'ligada' if cfg['ativo'] else 'DESLIGADA'}")
     print(f"Voz:        {cfg['voz']} ({VOZES_GEMINI.get(cfg['voz'], '?')})")
     print(f"Velocidade: {cfg['velocidade']:.1f}x  (sobre o ritmo 'rápido' do Gemini)")
-    print(f"Final:      {cfg['final']}")
     print(f"Falando:    {'sim' if worker_ativo() else 'não'}  ·  na fila: {len(list(FILA.glob('*.txt')))}")
 
 
@@ -1019,13 +1002,6 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
-    elif cmd == "final":
-        if len(a) > 1:
-            if a[1] not in ("completa", "resumo"):
-                sys.exit("Use: tts final completa | tts final resumo")
-            cfg["final"] = a[1]
-            salvar_config(cfg)
-        print(f"Resposta final: {cfg['final']}")
     elif cmd == "parar":
         print("Parado." if parar() else "Nada tocando.")
     elif cmd == "repetir":

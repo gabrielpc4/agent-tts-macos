@@ -7,7 +7,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 - **Natural, code-switching voice** — Google Gemini TTS, steered by a style prompt ("pronounce English terms like a native").
 - **Starts in ~2 seconds**, even for long answers: audio is streamed and played as it arrives.
 - **Never silent, never overlapping** — one playback queue; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
-- **Menu bar control** — on/off, voice (30 options), speed, "final answer: full or summary only", stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
+- **Menu bar control** — on/off, voice (30 options), speed, final answers only or with progress notes, stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
 - Code blocks, URLs, emojis and file paths are cleaned up before speaking.
 - **Plan usage at the end** — after each final answer it says the remaining % of your plan: weekly for Claude Code and Codex, monthly for Cursor (just the number, e.g. "65"). Turn off with `"falar_limite": false`.
 
@@ -52,10 +52,9 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Parar fala / Repetir última / Testar voz | Stop, replay (no API cost), sample |
 | Voz | 30 Gemini voices, female and male |
 | Velocidade | 1.0x–2.0x extra speed on top of the "fast" pace requested from Gemini (pitch preserved) |
-| Resposta final | Read the whole final answer, or only its first paragraph |
 | Modelo Gemini | Flash (best) or Flash-Lite (cheaper) |
 
-Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts final resumo`, `tts agora`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
+Command line equivalents: `tts`, `tts on|off`, `tts voz Kore`, `tts vozes`, `tts velocidade 1.3`, `tts intermediarias off`, `tts agora`, `tts parar`, `tts repetir`, `tts log`, `tts autoteste`.
 
 ## How it works
 
@@ -85,7 +84,7 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 |---|---|---|
 | `voz` | `Kore` | Any Gemini prebuilt voice |
 | `velocidade` | `1.0` | 1.0–2.0 |
-| `final` | `completa` | `completa` or `resumo` |
+| `intermediarias` | `true` | `false` reads only final answers |
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
 | `max_caracteres` | `3000` | Longer texts are cut at a sentence boundary |
 | `falar_limite` | `true` | Say the remaining plan % after final answers |
@@ -108,7 +107,7 @@ Set `estilo`, `voz_reserva` and `voz_offline` for your language, for example Eng
 
 ## Writing for the ear
 
-Agents write for screens: tables, paths, symbols. [`docs/regra-mensagens.md`](docs/regra-mensagens.md) is a template of instructions (for `CLAUDE.md`, `AGENTS.md` or Cursor User Rules) that makes their messages pleasant to listen to — and pairs with the "summary only" mode.
+Agents write for screens: tables, paths, symbols. [`docs/regra-mensagens.md`](docs/regra-mensagens.md) is a template of instructions (for `CLAUDE.md`, `AGENTS.md` or Cursor User Rules) that makes their messages pleasant to listen to.
 
 ## Privacy
 

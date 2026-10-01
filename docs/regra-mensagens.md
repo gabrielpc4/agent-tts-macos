@@ -1,6 +1,5 @@
 <!-- Modelo de instruções para agentes (CLAUDE.md, AGENTS.md ou User Rules do Cursor).
-     Troque <repo-1>, <repo-2> pelos seus projetos de trabalho. Funciona junto com o modo
-     "Resposta final: só o resumo", que lê apenas o primeiro parágrafo. -->
+     Troque <repo-1>, <repo-2> pelos seus projetos de trabalho. -->
 
 # Como trabalhar comigo
 
@@ -18,8 +17,7 @@ Estas regras valem só para o que você escreve para mim no chat. Nunca para có
 Uma ou duas frases curtas quando houver algo novo: o que você vai fazer e por quê. Não narre cada passo. Sem listas, caminhos ou código.
 
 ### Mensagem final, em qualquer projeto
-- O primeiro parágrafo precisa se sustentar sozinho, porque às vezes só ele é lido. O que vai nele depende do tipo de projeto, abaixo.
-- Depois, parágrafos curtos, um assunto por vez, sem seções fixas de relatório. O tamanho acompanha o tamanho e o impacto da tarefa.
+- Parágrafos curtos, um assunto por vez, sem seções fixas de relatório. O tamanho acompanha o tamanho e o impacto da tarefa.
 - Em uma ou duas frases, diga o que você verificou e como, e o que não deu para verificar. Se gerou evidência, como vídeos no PR, diga onde está.
 - Conte as suposições que você fez onde o pedido era ambíguo, e o que ficou de fora.
 - Clareza primeiro, depois brevidade. Se não há nada relevante a acrescentar, termine cedo.
@@ -28,7 +26,7 @@ Uma ou duas frases curtas quando houver algo novo: o que você vai fazer e por q
 Reconheça pelo nome exato da pasta do repositório, inclusive em worktrees e clones.
 
 Eu não leio os tickets: mando para você e você resolve. Preciso entender do que se trata e conseguir explicar o comportamento para alguém do time sem abrir o código. Então ensine, não só reporte:
-- No primeiro parágrafo: do que se trata o ticket em termos de produto (qual problema ou necessidade, para quem) e o resultado.
+- Comece pelo que se trata o ticket em termos de produto (qual problema ou necessidade, para quem) e pelo resultado.
 - Como o comportamento era antes e como ficou depois.
 - Todo o contexto necessário para entender o que mexemos: o fluxo em alto nível, quem participa (app, backend, serviços externos), o que trafega entre eles (dados, tokens, eventos), o que fica guardado, onde e por quanto tempo, quando cada passo acontece e o que acontece quando algo falha.
 - As decisões: o que você considerou, o que escolheu e por quê, e o que descartou.
@@ -39,7 +37,7 @@ Eu não leio os tickets: mando para você e você resolve. Preciso entender do q
 Quando eu perguntar como algo funciona, responda com esse mesmo olhar de fluxo.
 
 ### Outros projetos (pessoais)
-Os requisitos são meus, então não repita nem reformule o pedido: assumo que você fez o que pedi. Não me diga como testar, e não me importa como foi implementado. Responda à pergunta "o que mais eu preciso saber?", com o mais importante já no primeiro parágrafo:
+Os requisitos são meus, então não repita nem reformule o pedido: assumo que você fez o que pedi. Não me diga como testar, e não me importa como foi implementado. Responda à pergunta "o que mais eu preciso saber?", começando pelo mais importante:
 - O que você descobriu no caminho e eu não previ.
 - Caminhos que você considerou e por que foi por outro.
 - O que eu provavelmente não considerei e passaria batido: efeitos em outras partes do app, limitações, riscos, custos, dados afetados.
