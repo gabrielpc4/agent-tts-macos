@@ -15,7 +15,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 
 - macOS (Apple Silicon or Intel) with [Homebrew](https://brew.sh): `brew install python ffmpeg`
 - At least one of: Claude Code (CLI or desktop), Codex (CLI, IDE or desktop app), Cursor.
-- Optional but recommended: a **Gemini API key with billing enabled**. The free tier allows only ~10 TTS requests per day, which is not enough. Cost is about US$ 0.80 per hour of speech (Gemini 3.8 Flash TTS, 2026 pricing). Without a key, the free Microsoft voice is used.
+- Optional but recommended: a **Gemini API key with billing enabled**. The free tier allows only ~10 TTS requests per day, which is not enough. Cost is about US$ 0.80 per hour of speech (Gemini 3.8 Flash TTS, 2026 pricing). Without a key, the free Microsoft voice is used. Even when paying, Tier 1 accounts are capped at about 100 TTS requests per day per model; when Flash hits it, the app switches to Flash-Lite (separate quota) and only then to Microsoft, until Google's reset time.
 
 ## Install
 

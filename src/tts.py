@@ -48,7 +48,6 @@ LOCK = BASE / "worker.lock"
 FILA = BASE / "fila"
 ESTADO = BASE / "estado"
 LOG = BASE / "tts.log"
-PAUSA_GEMINI = BASE / "gemini_pausado_ate"
 ULTIMO = BASE / "ultimo"  # ultimo.wav / ultimo.mp3 / ultimo.aiff
 PYTHON = BASE / ".venv" / "bin" / "python"
 
@@ -181,7 +180,7 @@ def binario(nome: str) -> str:
 
 FFPLAY = binario("ffplay")
 FFMPEG = binario("ffmpeg")
-SEGMENTO_MAX = 1500  # caracteres por pedido ao Gemini; textos maiores viram vários pedidos
+SEGMENTO_MAX = 3000  # caracteres por pedido ao Gemini (a cota é por pedido, então menos pedidos é melhor)
 
 
 def chave(servico: str) -> str | None:
@@ -214,7 +213,7 @@ def gemini_stream(texto: str, voz: str, modelo: str, estilo: str = ESTILO):
     except urllib.error.HTTPError as e:
         erro = f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
         if e.code == 429:
-            pausar_gemini(erro)
+            pausar_gemini(erro, modelo)
         raise RuntimeError(erro)
     with resposta:
         for bruto in resposta:
@@ -232,18 +231,41 @@ def gemini_stream(texto: str, voz: str, modelo: str, estilo: str = ESTILO):
                 yield base64.b64decode(delta["data"])
 
 
-def pausar_gemini(erro: str) -> None:
-    m = re.search(r"retry in (\d+)", erro)
-    segundos = 3600 if "per day" in erro else int(m.group(1)) + 2 if m else 120
-    PAUSA_GEMINI.write_text(str(time.time() + segundos))
-    log(f"gemini pausado por {segundos}s (limite de uso)")
+MODELOS_GEMINI = ("gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts")  # cotas diárias separadas
 
 
-def gemini_pausado() -> bool:
+def arquivo_pausa(modelo: str) -> Path:
+    return BASE / f"pausa-{modelo}"
+
+
+def pausar_gemini(erro: str, modelo: str) -> None:
+    """Respeita o 'retry in 10h22m21s' do Google; cada modelo tem sua própria cota."""
+    m = re.search(r"retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", erro)
+    segundos = 0.0
+    if m:
+        for valor, unidade in re.findall(r"([\d.]+)([hms])", m.group(1)):
+            segundos += float(valor) * {"h": 3600, "m": 60, "s": 1}[unidade]
+    segundos = segundos + 5 if segundos else 120
+    arquivo_pausa(modelo).write_text(str(time.time() + segundos))
+    log(f"{modelo} pausado por {segundos / 60:.0f} min (limite de uso)")
+
+
+def gemini_pausado(modelo: str | None = None) -> bool:
+    """Sem modelo: True só se todos os modelos estiverem pausados."""
+    def pausado(m: str) -> bool:
+        try:
+            return time.time() < float(arquivo_pausa(m).read_text())
+        except (FileNotFoundError, ValueError):
+            return False
+    return pausado(modelo) if modelo else all(pausado(m) for m in MODELOS_GEMINI)
+
+
+def pausa_ate(modelo: str) -> float | None:
     try:
-        return time.time() < float(PAUSA_GEMINI.read_text())
+        ate = float(arquivo_pausa(modelo).read_text())
+        return ate if ate > time.time() else None
     except (FileNotFoundError, ValueError):
-        return False
+        return None
 
 
 def edge_stream(texto: str, voz: str, entregar) -> None:
@@ -298,21 +320,24 @@ def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
     motores = []
     for i, segmento in enumerate(segmentos, 1):
         motor = None
-        if not gemini_pausado():
+        preferido = cfg["modelo"]
+        for modelo in [preferido] + [m for m in MODELOS_GEMINI if m != preferido]:
+            if motor or gemini_pausado(modelo):
+                continue
             for tentativa in (1, 2):
                 recebeu = False
                 try:
-                    for pedaco in gemini_stream(segmento, cfg["voz"], cfg["modelo"], cfg.get("estilo") or ESTILO):
+                    for pedaco in gemini_stream(segmento, cfg["voz"], modelo, cfg.get("estilo") or ESTILO):
                         recebeu = True
                         entregar(("pcm", pedaco))
-                    motor = "gemini"
+                    motor = "gemini" if modelo == preferido else f"gemini ({modelo})"
                     break
                 except Exception as e:
-                    log(f"falha gemini parte={i} tentativa={tentativa}: {str(e)[:200]}")
+                    log(f"falha {modelo} parte={i} tentativa={tentativa}: {str(e)[:200]}")
                     if recebeu:
                         motor = "gemini-parcial"
                         break
-                    if gemini_pausado() or re.match(r"HTTP 4\d\d", str(e)):
+                    if gemini_pausado(modelo) or re.match(r"HTTP 4\d\d", str(e)):
                         break  # erro do pedido (ou limite): repetir não adianta
                     time.sleep(0.8)
         if motor is None:

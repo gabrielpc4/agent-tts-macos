@@ -110,9 +110,13 @@ class App(rumps.App):
         self.title = ICONE_DESLIGADO if not cfg["ativo"] else ICONE_FALANDO if falando() else ICONE_LIGADO
         if time.time() < self.aviso_ate:
             self.item_status.title = self.aviso
-        elif tts.gemini_pausado():
-            ate = time.strftime("%H:%M", time.localtime(float(tts.PAUSA_GEMINI.read_text())))
-            self.item_status.title = f"⚠️ Gemini no limite, usando reserva até {ate}"
+        elif pausas := [(mod, ate) for mod in tts.MODELOS_GEMINI if (ate := tts.pausa_ate(mod))]:
+            nomes = {"gemini-3.8-flash-tts": "Flash", "gemini-3.8-flash-lite-tts": "Flash-Lite"}
+            reserva = "Microsoft" if len(pausas) == len(tts.MODELOS_GEMINI) else \
+                next(nomes[mod] for mod in tts.MODELOS_GEMINI if mod not in dict(pausas))
+            mod, ate = pausas[0]
+            self.item_status.title = (f"⚠️ {nomes[mod]} no limite diário até "
+                                      f"{time.strftime('%H:%M', time.localtime(ate))}, usando {reserva}")
         else:
             fila = len(list(tts.FILA.glob("*.txt"))) if tts.FILA.exists() else 0
             self.item_status.title = f"Gemini ok · na fila: {fila}"
