@@ -121,6 +121,8 @@ EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D
 
 def limpar(texto: str, limite: int) -> str:
     t = re.sub(r"```.*?(```|$)", " ", texto, flags=re.S)           # blocos de código
+    t = re.sub(r"<(oai-mem-citation|citation_entries|rollout_ids|system-reminder)\b[^>]*>.*?(</\1>|$)",
+               " ", t, flags=re.S)                                   # citações de memória do Codex etc.
     t = re.sub(r"<[^>\n]+>", " ", t)                                 # tags html/xml
 
     def inline(m):
@@ -648,7 +650,7 @@ def textos_turno_codex(caminho: str) -> list[str]:
         if e.get("type") == "event_msg" and p.get("type") == "task_started":
             break
         if e.get("type") == "response_item" and p.get("type") == "message" \
-                and p.get("role") == "assistant":
+                and p.get("role") == "assistant" and p.get("phase") != "final_answer":
             textos = [c.get("text", "") for c in p.get("content", [])
                       if c.get("type") == "output_text"] + textos
     return [t for t in textos if t.strip()]
@@ -710,8 +712,9 @@ def hook(origem: str, evento: str) -> None:
             transcript) if transcript else []
         if evento == "stop":
             final = dados.get("last_assistant_message") or (intermediarias[-1] if intermediarias else "")
-            normal = " ".join(final.split())
-            intermediarias = [t for t in intermediarias if " ".join(t.split()) != normal]
+            final_limpo = limpar(final, 10_000)[:200]
+            intermediarias = [t for t in intermediarias
+                              if not final_limpo or not limpar(t, 10_000).startswith(final_limpo[:150])]
     sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
     novos = so_os_novos(sessao, [t for t in intermediarias + [final] if t.strip()])
     modo = ler_config()["final"]
