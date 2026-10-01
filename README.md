@@ -89,7 +89,7 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 | `velocidade` | `1.0` | 1.0–2.0 |
 | `intermediarias` | `true` | `false` reads only final answers |
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
-| `max_caracteres` | `3000` | Longer texts are cut at a sentence boundary |
+| `max_caracteres` | `0` | 0 reads the whole answer (each 3000 characters is one request); a number cuts the speech at a sentence boundary |
 | `falar_limite` | `true` | Say the remaining plan % after final answers |
 | `silencio_inicial_ms` | `600` | Silence played before each utterance so the speakers wake up and the first word isn't swallowed |
 | `estilo` | PT-BR style prompt | Instruction sent to Gemini (language, pace, pronunciation) |

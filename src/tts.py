@@ -59,7 +59,7 @@ PADRAO = {
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
     "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
     "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
-    "max_caracteres": 3000,
+    "max_caracteres": 0,         # 0 = lê a resposta inteira (cada 3 mil caracteres viram um pedido)
     "silencio_inicial_ms": 600,
     "falar_limite": True,        # no fim da resposta final, fala o % restante do plano (semana ou mês)  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
@@ -121,7 +121,7 @@ def log(msg: str) -> None:
 EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
 
 
-def limpar(texto: str, limite: int) -> str:
+def limpar(texto: str, limite: int = 0) -> str:
     t = re.sub(r"```.*?(```|$)", " ", texto, flags=re.S)           # blocos de código
     t = re.sub(r"<(oai-mem-citation|citation_entries|rollout_ids|system-reminder)\b[^>]*>.*?(</\1>|$)",
                " ", t, flags=re.S)                                   # citações de memória do Codex etc.
@@ -163,7 +163,7 @@ def limpar(texto: str, limite: int) -> str:
     t = re.sub(r"([.,!?;:])\1+", r"\1", t)
     t = re.sub(r"\s+", " ", t).strip(" .,")
 
-    if len(t) > limite:
+    if limite and len(t) > limite:
         corte = max(t.rfind(p, 0, limite) for p in ".!?")
         t = t[: corte + 1 if corte > limite // 2 else limite]
     return t
@@ -363,7 +363,7 @@ class Item:
 
     def __init__(self, texto: str, enfileirado_em: float):
         cfg = ler_config()
-        self.limpo = limpar(texto, cfg["max_caracteres"])
+        self.limpo = limpar(texto, cfg.get("max_caracteres", 0))
         self.enfileirado_em = enfileirado_em
         self.pedacos: queue.Queue = queue.Queue()
         self.motor = "?"
