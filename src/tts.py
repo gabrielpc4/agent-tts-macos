@@ -9,7 +9,6 @@ Comandos:
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
-  tts pausa-frases 0..3    segundos de pausa entre uma frase e outra
   tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
@@ -22,7 +21,6 @@ Comandos:
 
 Uso interno (hooks):  tts hook claude|codex stop|tool  ·  tts hook cursor   (JSON do hook no stdin)
 """
-import array
 import base64
 import fcntl
 import glob
@@ -59,7 +57,6 @@ PADRAO = {
     "voz": "Kore",
     "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
-    "pausa_frases": 3,           # segundos de pausa entre frases (0 a 3)
     "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
     "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
     "max_caracteres": 3000,
@@ -315,85 +312,14 @@ def segmentar(texto: str, maximo: int = SEGMENTO_MAX) -> list[str]:
     return partes
 
 
-FIM_DE_FRASE = re.compile(r"[.!?…]+(?=\s)")
-
-
-def segmentar_para(cfg: dict, texto: str) -> list[str]:
-    """Com pausa entre frases, o primeiro pedido leva só 1 ou 2 frases: ele precisa ficar
-    pronto inteiro antes de tocar, e o resto é gerado enquanto ele toca."""
-    if not float(cfg.get("pausa_frases", 0)):
-        return segmentar(texto)
-    frases, primeiro = re.split(r"(?<=[.!?…])\s+", texto), ""
-    while frases and (not primeiro or len(primeiro) + len(frases[0]) < 250):
-        primeiro = f"{primeiro} {frases.pop(0)}".strip()
-    resto = " ".join(frases)
-    return [primeiro] + (segmentar(resto) if resto else [])
-
-
-def pausar_entre_frases(pcm: bytes, texto: str, segundos: float) -> bytes:
-    """Estica até `segundos` a pausa de cada fim de frase do áudio.
-
-    O Gemini não diz onde cada frase termina, e às vezes pausa mais numa vírgula do que num
-    ponto. Por isso cada fim de frase é procurado perto de onde deveria cair (a fala tem
-    velocidade quase constante, então a posição do ponto no texto prevê o tempo no áudio),
-    preferindo a pausa mais longa dessa vizinhança."""
-    fins = [m.end() for m in FIM_DE_FRASE.finditer(texto + " ") if m.end() < len(texto.rstrip())]
-    if not fins or segundos <= 0 or not pcm:
-        return pcm
-    a = array.array("h", pcm)
-    janela = 240  # 10 ms
-    volumes = [(sum(x * x for x in a[i:i + janela]) / janela) ** 0.5 for i in range(0, len(a) - janela, janela)]
-    pico = max(volumes) or 1
-    falando = [v >= 0.03 * pico for v in volumes]
-    if True not in falando:
-        return pcm
-    comeco, final = falando.index(True), len(falando) - falando[::-1].index(True)
-    pausas, i = [], comeco
-    while i < final:
-        if not falando[i]:
-            k = i
-            while k < final and not falando[k]:
-                k += 1
-            if k - i >= 8:  # 80 ms ou mais
-                pausas.append((i, k))
-            i = k
-        else:
-            i += 1
-    escolhidas, depois_de = [], comeco
-    for fim_frase in fins:
-        previsto = comeco + fim_frase / len(texto) * (final - comeco)
-        candidatas = [q for q in pausas if q[0] > depois_de]
-        if not candidatas:
-            break
-        # 10 ms de pausa valem o mesmo que 20 ms de distância do lugar previsto
-        melhor = max(candidatas, key=lambda q: (q[1] - q[0]) - 0.5 * abs((q[0] + q[1]) / 2 - previsto))
-        escolhidas.append(melhor)
-        depois_de = melhor[1]
-    saida, inicio = bytearray(), 0
-    for i, k in escolhidas:
-        meio = (i + k) // 2 * janela
-        extra = int(segundos * TAXA) - (k - i) * janela
-        saida += a[inicio:meio].tobytes() + bytes(max(0, extra) * 2)
-        inicio = meio
-    return bytes(saida + a[inicio:].tobytes())
-
-
 def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
     """Gera o áudio de cada parte, em ordem, entregando pedaços (formato, bytes).
 
     Gemini (até 2 tentativas) → Microsoft → say. Se o Gemini falhar depois de já ter
     entregado áudio daquela parte, não repete a parte em outra voz."""
     motores = []
-    pausa = float(cfg.get("pausa_frases", 0))
     for i, segmento in enumerate(segmentos, 1):
         motor = None
-        acumulado = bytearray() if pausa else None  # com pausa, o trecho precisa estar inteiro
-
-        def pcm(dados: bytes) -> None:
-            if acumulado is None:
-                entregar(("pcm", dados))
-            else:
-                acumulado.extend(dados)
         preferido = cfg["modelo"]
         for modelo in [preferido] + [m for m in MODELOS_GEMINI if m != preferido]:
             if motor or gemini_pausado(modelo):
@@ -403,7 +329,7 @@ def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
                 try:
                     for pedaco in gemini_stream(segmento, cfg["voz"], modelo, cfg.get("estilo") or ESTILO):
                         recebeu = True
-                        pcm(pedaco)
+                        entregar(("pcm", pedaco))
                     motor = "gemini" if modelo == preferido else f"gemini ({modelo})"
                     break
                 except Exception as e:
@@ -421,15 +347,11 @@ def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
             except Exception as e:
                 log(f"falha edge parte={i}: {str(e)[:200]}")
                 try:
-                    pcm(say_pcm(segmento, cfg["voz_offline"]))
+                    entregar(("pcm", say_pcm(segmento, cfg["voz_offline"])))
                     motor = "say"
                 except Exception as e2:
                     log(f"falha say parte={i}: {e2}")
                     motor = "nenhum"
-        if acumulado:
-            entregar(("pcm", pausar_entre_frases(bytes(acumulado), segmento, pausa)))
-        if pausa and i < len(segmentos):
-            entregar(("pcm", bytes(int(pausa * TAXA) * 2)))  # a divisão entre pedidos também é fim de frase
         motores.append(motor)
     return ",".join(motores)
 
@@ -450,7 +372,7 @@ class Item:
 
     def _produzir(self, cfg: dict) -> None:
         try:
-            self.motor = produzir(segmentar_para(cfg, self.limpo), cfg, self.pedacos.put)
+            self.motor = produzir(segmentar(self.limpo), cfg, self.pedacos.put)
         except Exception as e:
             log(f"erro na produção: {e}")
         finally:
@@ -1192,11 +1114,6 @@ def main() -> None:
         cfg["velocidade"] = round(min(2.0, max(1.0, v)), 2)
         salvar_config(cfg)
         print(f"Velocidade: {cfg['velocidade']:.1f}x")
-    elif cmd == "pausa-frases":
-        if len(a) > 1:
-            cfg["pausa_frases"] = max(0, min(3, int(a[1])))
-            salvar_config(cfg)
-        print(f"Pausa entre frases: {cfg.get('pausa_frases', 0)} s")
     elif cmd == "subagentes":
         if len(a) > 1:
             cfg["subagentes_codex"] = a[1] in ("on", "sim", "ligar")

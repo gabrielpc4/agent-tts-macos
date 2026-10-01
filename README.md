@@ -54,7 +54,6 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Ler passos intermediários | Off = read only final answers, skipping progress notes (`tts intermediarias off`) |
 | Parar fala / Repetir última / Testar voz | Stop, replay (no API cost), sample |
 | Voz | 30 Gemini voices, female and male |
-| Pausa entre frases | 0–3 s of silence after each sentence (default 3) |
 | Velocidade | 1.0x–2.0x extra speed on top of the "fast" pace requested from Gemini (pitch preserved) |
 | Modelo Gemini | Flash (best) or Flash-Lite (cheaper) |
 
@@ -78,8 +77,6 @@ agent hook ──► tts.py hook ──► queue (~/.tts-agentes/fila) ──►
 
 Claude Code's desktop app saves some progress notes as "narration" blocks; those are read too, while real reasoning blocks never are.
 
-Sentence pauses: Gemini doesn't mark where sentences end, so each finished part is scanned for silences and every sentence end in the text is matched to the longest silence near where it should fall (speech rate is nearly constant), then stretched. The first request carries only one or two sentences so playback still starts in about 3.5 s.
-
 Long texts are split into ~1500-character parts and streamed back to back. Gemini rate limits (HTTP 429) pause Gemini automatically and the fallback voice is used meanwhile; the menu shows it.
 
 ## Configuration
@@ -94,7 +91,6 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
 | `max_caracteres` | `3000` | Longer texts are cut at a sentence boundary |
 | `falar_limite` | `true` | Say the remaining plan % after final answers |
-| `pausa_frases` | `3` | Seconds of silence between sentences, 0–3 (`tts pausa-frases 2`) |
 | `silencio_inicial_ms` | `600` | Silence played before each utterance so the speakers wake up and the first word isn't swallowed |
 | `estilo` | PT-BR style prompt | Instruction sent to Gemini (language, pace, pronunciation) |
 | `voz_reserva` | `pt-BR-ThalitaMultilingualNeural` | Microsoft fallback voice (`edge-tts --list-voices`) |

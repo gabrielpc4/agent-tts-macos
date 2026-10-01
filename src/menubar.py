@@ -56,12 +56,6 @@ class App(rumps.App):
             item.vel = v
             self.menu_vel.add(item)
 
-        self.menu_pausa = rumps.MenuItem("Pausa entre frases")
-        for seg in range(4):
-            item = rumps.MenuItem(f"{seg} s" + ("  (sem pausa)" if seg == 0 else ""), callback=self.trocar_pausa)
-            item.seg = seg
-            self.menu_pausa.add(item)
-
         self.menu_modelo = rumps.MenuItem("Modelo Gemini")
         for mid, desc in MODELOS.items():
             item = rumps.MenuItem(desc, callback=self.trocar_modelo)
@@ -80,7 +74,6 @@ class App(rumps.App):
             None,
             self.menu_voz,
             self.menu_vel,
-            self.menu_pausa,
             self.menu_modelo,
             None,
             self.item_status,
@@ -103,9 +96,6 @@ class App(rumps.App):
                 item.state = int(item.voz == cfg["voz"])
         for item in self.menu_vel.values():
             item.state = int(abs(item.vel - cfg["velocidade"]) < 0.01)
-        for item in self.menu_pausa.values():
-            item.state = int(item.seg == int(cfg.get("pausa_frases", 0)))
-        self.menu_pausa.title = f"Pausa entre frases: {int(cfg.get('pausa_frases', 0))} s"
         for item in self.menu_modelo.values():
             item.state = int(item.modelo == cfg["modelo"])
         self.menu_voz.title = f"Voz: {cfg['voz']}"
@@ -160,9 +150,6 @@ class App(rumps.App):
     def trocar_velocidade(self, item):
         self.salvar(velocidade=item.vel)
         self.repetir(None)  # ouve na hora, sem gastar API
-
-    def trocar_pausa(self, item):
-        self.salvar(pausa_frases=item.seg)
 
     def trocar_modelo(self, item):
         self.salvar(modelo=item.modelo)
