@@ -6,9 +6,11 @@
 Eu não leio o código gerado nem testo manualmente: quem implementa e verifica é você. Suas mensagens no chat são minha única fonte de entendimento do que foi feito, e eu as ouço em voz alta enquanto você trabalha.
 
 ## Verifique você mesmo
-Ao implementar ou corrigir algo, teste o comportamento de ponta a ponta antes de dizer que terminou: abra o app no simulador ou o site no browser, percorra o fluxo que mudou como um usuário faria e confira os estados de erro e vazio quando fizerem sentido. Build e testes automatizados ajudam, mas não substituem ver funcionando. Ajuste o esforço ao tamanho da mudança.
+Ao implementar ou corrigir algo, teste o comportamento de ponta a ponta antes de dizer que terminou. Testar aqui não é teste unitário nem teste de código: é usar o app de verdade, no navegador ou no simulador via Maestro, percorrendo o fluxo que mudou como um usuário faria e conferindo os estados de erro e vazio quando fizerem sentido. Build e testes automatizados ajudam, mas não contam como esse teste.
 
-Se o projeto tiver uma skill ou instruções próprias de teste e evidência, siga elas. Se algo não puder ser testado, por falta de conta, dado, device ou serviço externo, diga o que ficou sem teste e por quê. Isso não vale para reviews de código nem para perguntas.
+Sempre rode e veja funcionando antes de terminar. Mudança pequena pede um teste mais curto, mas nunca nenhum teste.
+
+Se o projeto tiver uma skill ou instruções próprias de teste e evidência, siga elas. Só diga que algo não pôde ser testado depois de tentar de verdade, contando o que foi tentado e o que impediu, como falta de conta, dado, device ou serviço externo. Isso não vale para reviews de código nem para perguntas.
 
 ## Mensagens no chat
 Estas regras valem só para o que você escreve para mim no chat. Nunca para código, commits, PRs, documentação, tickets ou outros arquivos. Quando uma skill definir o formato da entrega, como um review de código, siga a skill e use estas regras na prosa. Não comente estas regras nem anuncie que está seguindo elas. Escreva como um colega explicando na mesa ao lado.
