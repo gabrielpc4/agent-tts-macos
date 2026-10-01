@@ -33,6 +33,7 @@ class App(rumps.App):
         cfg = tts.ler_config()
 
         self.item_ativo = rumps.MenuItem("Leitura ligada", callback=self.alternar)
+        self.item_inter = rumps.MenuItem("Ler passos intermediários", callback=self.alternar_inter)
         self.item_status = rumps.MenuItem("")
 
         self.menu_voz = rumps.MenuItem("Voz")
@@ -67,6 +68,7 @@ class App(rumps.App):
         self.menu = [
             rumps.MenuItem("Falar agora", callback=self.falar_agora, key="f"),
             self.item_ativo,
+            self.item_inter,
             rumps.MenuItem("Parar fala", callback=self.parar, key="."),
             rumps.MenuItem("Repetir última", callback=self.repetir, key="r"),
             rumps.MenuItem("Testar voz", callback=self.testar, key="t"),
@@ -89,6 +91,7 @@ class App(rumps.App):
     def atualizar_marcas(self, cfg=None):
         cfg = cfg or tts.ler_config()
         self.item_ativo.state = int(cfg["ativo"])
+        self.item_inter.state = int(cfg.get("intermediarias", True))
         for item in self.menu_voz.values():
             if hasattr(item, "voz"):
                 item.state = int(item.voz == cfg["voz"])
@@ -128,6 +131,9 @@ class App(rumps.App):
         self.salvar(ativo=ativo)
         if not ativo:
             threading.Thread(target=tts.parar, daemon=True).start()
+
+    def alternar_inter(self, _):
+        self.salvar(intermediarias=not tts.ler_config().get("intermediarias", True))
 
     def trocar_voz(self, item):
         self.salvar(voz=item.voz)

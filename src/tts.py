@@ -8,6 +8,7 @@ Comandos:
   tts vozes                lista as vozes disponíveis
   tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
   tts mais | menos         +0.1 / -0.1 na velocidade
+  tts intermediarias on|off   lê ou pula os passos no meio do trabalho
   tts final [completa|resumo]  resposta final inteira ou só o primeiro parágrafo
   tts parar                interrompe a fala atual
   tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
@@ -56,7 +57,8 @@ PADRAO = {
     "voz": "Kore",
     "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
-    "final": "completa",     # "completa" ou "resumo" (só o primeiro parágrafo da resposta final)
+    "final": "completa",
+    "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho     # "completa" ou "resumo" (só o primeiro parágrafo da resposta final)
     "max_caracteres": 3000,
     "silencio_inicial_ms": 600,
     "falar_limite": True,        # no fim da resposta final, fala o % restante do plano (semana ou mês)  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
@@ -701,7 +703,8 @@ def hook(origem: str, evento: str) -> None:
         sys.stdout.flush()
     if origem == "cursor" or evento == "stop":
         guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
-    if not ler_config()["ativo"]:
+    cfg = ler_config()
+    if not cfg["ativo"] or (evento == "tool" and not cfg.get("intermediarias", True)):
         return
     transcript = dados.get("transcript_path") or ""
     final = ""
@@ -715,6 +718,8 @@ def hook(origem: str, evento: str) -> None:
             final_limpo = limpar(final, 10_000)[:200]
             intermediarias = [t for t in intermediarias
                               if not final_limpo or not limpar(t, 10_000).startswith(final_limpo[:150])]
+    if not cfg.get("intermediarias", True):
+        intermediarias = []
     sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
     novos = so_os_novos(sessao, [t for t in intermediarias + [final] if t.strip()])
     modo = ler_config()["final"]
@@ -984,6 +989,11 @@ def main() -> None:
         cfg["velocidade"] = round(min(2.0, max(1.0, v)), 2)
         salvar_config(cfg)
         print(f"Velocidade: {cfg['velocidade']:.1f}x")
+    elif cmd == "intermediarias":
+        if len(a) > 1:
+            cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
+            salvar_config(cfg)
+        print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
     elif cmd == "final":
         if len(a) > 1:
             if a[1] not in ("completa", "resumo"):
