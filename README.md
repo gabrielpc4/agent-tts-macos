@@ -84,6 +84,7 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 | `final` | `completa` | `completa` or `resumo` |
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
 | `max_caracteres` | `3000` | Longer texts are cut at a sentence boundary |
+| `silencio_inicial_ms` | `600` | Silence played before each utterance so the speakers wake up and the first word isn't swallowed |
 | `estilo` | PT-BR style prompt | Instruction sent to Gemini (language, pace, pronunciation) |
 | `voz_reserva` | `pt-BR-ThalitaMultilingualNeural` | Microsoft fallback voice (`edge-tts --list-voices`) |
 | `voz_offline` | `Luciana` | macOS voice (`say -v '?'`) |

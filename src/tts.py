@@ -57,7 +57,8 @@ PADRAO = {
     "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
     "final": "completa",     # "completa" ou "resumo" (só o primeiro parágrafo da resposta final)
-    "max_caracteres": 3000,  # respostas maiores são cortadas no fim de uma frase
+    "max_caracteres": 3000,
+    "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
     "voz_offline": "Luciana",
 }
@@ -352,10 +353,18 @@ RESERVA_INICIAL = 24000          # bytes de PCM (0,5 s) acumulados antes de abri
 RESPIRO_FINAL = bytes(12000)     # 0,25 s de silêncio para o player não cortar a última sílaba
 
 
+def filtros(velocidade: float) -> list[str]:
+    """Velocidade extra e um silêncio de entrada, para o alto-falante acordar antes da fala."""
+    partes = [f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
+    if (atraso := int(ler_config().get("silencio_inicial_ms", 600))) > 0:
+        partes.append(f"adelay={atraso}:all=1")
+    return ["-af", ",".join(partes)] if partes else []
+
+
 def abrir_player(formato: str, velocidade: float) -> subprocess.Popen:
     entrada = (["-f", "s16le", "-sample_rate", "24000", "-ch_layout", "mono"]
                if formato == "pcm" else ["-f", "mp3"])
-    filtro = ["-af", f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
+    filtro = filtros(velocidade)
     if destino_teste := os.environ.get("TTS_SINK_DIR"):  # testes: grava em vez de tocar
         saida = Path(destino_teste) / f"{time.time_ns()}.wav"
         comando = [FFMPEG, "-loglevel", "quiet", "-y", *entrada,
@@ -457,7 +466,7 @@ def tocar(item) -> None:
 
 
 def tocar_arquivo(arquivo: Path, velocidade: float) -> None:
-    filtro = ["-af", f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
+    filtro = filtros(velocidade)
     if destino_teste := os.environ.get("TTS_SINK_DIR"):
         comando = [FFMPEG, "-loglevel", "quiet", "-y", "-i", str(arquivo),
                    *filtro, str(Path(destino_teste) / f"{time.time_ns()}-repetir.wav")]
