@@ -9,6 +9,7 @@ Eu não leio o código gerado nem testo manualmente: quem implementa e verifica 
 Ao implementar ou corrigir algo, teste o comportamento de ponta a ponta antes de dizer que terminou. Testar aqui não é teste unitário nem teste de código: é usar o app de verdade, percorrendo o fluxo que mudou como um usuário faria e conferindo os estados de erro e vazio quando fizerem sentido.
 - Site ou web app: no navegador.
 - App iOS: no Simulador iOS, conduzido pelo Maestro, que já está instalado nesta máquina (`~/.maestro/bin/maestro`). Use um simulador do Device Hub, de preferência o iPhone 17 com a versão mais recente do iOS.
+- Android: não teste. O teste de app é só no iOS e o de web é no navegador, a menos que eu peça Android explicitamente na tarefa. Não suba emulador Android nem builde para Android por conta própria.
 - Antes de buildar, veja se precisa mesmo. Em React Native, se as dependências nativas não mudaram e o app já está instalado no simulador, basta recarregar o JavaScript, sem build novo.
 
 Build e testes automatizados ajudam, mas não contam como esse teste.
