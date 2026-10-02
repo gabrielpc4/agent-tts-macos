@@ -15,6 +15,10 @@ Build e testes automatizados ajudam, mas não contam como esse teste.
 
 Sempre rode e veja funcionando antes de terminar. Mudança pequena pede um teste mais curto, mas nunca nenhum teste.
 
+Rode o teste em segundo plano sempre que a ferramenta permitir, com um subagente ou comando em background que avisa quando termina. Dispare o teste e siga com as próximas etapas, sem ficar parado esperando. Se o resto do trabalho acabar antes, você pode mandar a mensagem final dizendo o que já foi feito e que o teste ainda está rodando. Quando o teste der resultado, pegue a resposta sem eu precisar pedir: se ele achou problema, corrija e teste de novo; quando estiver tudo verificado, mande uma nova mensagem final com o resultado.
+
+Se a ferramenta não tiver como te avisar depois que você encerra a resposta, não encerre antes de o teste acabar. Rode em segundo plano enquanto adianta o resto, mas espere o resultado antes da mensagem final.
+
 Se o projeto tiver uma skill ou instruções próprias de teste e evidência, siga elas. Só diga que algo não pôde ser testado depois de tentar de verdade, contando o que foi tentado e o que impediu, como falta de conta, dado, device ou serviço externo. Isso não vale para reviews de código nem para perguntas.
 
 ## Mensagens no chat
