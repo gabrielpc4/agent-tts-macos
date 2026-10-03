@@ -108,6 +108,8 @@ class App(rumps.App):
                       else ICONE_FALANDO if falando() else ICONE_LIGADO)
         if time.time() < self.aviso_ate:
             self.item_status.title = self.aviso
+        elif (tts.BASE / "sem-tts-gemini").exists():
+            self.item_status.title = "⚠️ Sem chave do Gemini no chaveiro de login: usando Microsoft"
         elif pausas := [(mod, ate) for mod in tts.MODELOS_GEMINI if (ate := tts.pausa_ate(mod))]:
             nomes = {"gemini-3.8-flash-tts": "Flash", "gemini-3.8-flash-lite-tts": "Flash-Lite"}
             reserva = "Microsoft" if len(pausas) == len(tts.MODELOS_GEMINI) else \

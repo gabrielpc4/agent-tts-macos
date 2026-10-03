@@ -12,6 +12,7 @@ fi
 if [[ "$servico" == tts-gemini && "$chave" == sk_* ]]; then
   echo "❌ Isso parece uma chave do ElevenLabs, não do Gemini. Nada foi salvo."; exit 1
 fi
-security add-generic-password -U -a "$USER" -s "$servico" -w "$chave"
+# Sempre no chaveiro de login: o padrão do Mac pode ser um chaveiro temporário (fastlane, EAS)
+security add-generic-password -U -a "$USER" -s "$servico" -w "$chave" "$HOME/Library/Keychains/login.keychain-db"
 printf '' | pbcopy
 echo "✅ $servico salva no Keychain (${chave:0:4}…, ${#chave} caracteres). Clipboard limpo."

@@ -184,10 +184,22 @@ FFMPEG = binario("ffmpeg")
 SEGMENTO_MAX = 3000  # caracteres por pedido ao Gemini (a cota é por pedido, então menos pedidos é melhor)
 
 
+CHAVEIRO_LOGIN = Path.home() / "Library/Keychains/login.keychain-db"
+
+
 def chave(servico: str) -> str | None:
-    r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", servico, "-w"],
-                       capture_output=True, text=True)
-    return r.stdout.strip() or None
+    """Lê só do chaveiro de login. Procurar em todos faz o macOS pedir a senha de chaveiros
+    trancados (como os temporários do fastlane/EAS) a cada login."""
+    r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", servico, "-w",
+                        str(CHAVEIRO_LOGIN)], capture_output=True, text=True)
+    aviso = BASE / f"sem-{servico}"
+    if not r.stdout.strip():
+        if not aviso.exists():
+            log(f"chave {servico} não está no chaveiro de login: usando a voz reserva")
+        aviso.touch()
+        return None
+    aviso.unlink(missing_ok=True)
+    return r.stdout.strip()
 
 
 def gemini_stream(texto: str, voz: str, modelo: str, estilo: str = ESTILO):

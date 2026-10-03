@@ -65,7 +65,7 @@ launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || { echo "  ⚠️  Não 
 
 echo
 echo "Pronto. Próximos passos:"
-if security find-generic-password -s tts-gemini >/dev/null 2>&1; then
+if security find-generic-password -s tts-gemini "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
   echo "  • Chave do Gemini já está no Keychain."
 else
   echo "  • Crie uma chave em https://aistudio.google.com/apikey, copie e rode:"
