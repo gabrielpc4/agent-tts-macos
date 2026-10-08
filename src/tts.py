@@ -842,8 +842,8 @@ def hook(origem: str, evento: str) -> None:
     if origem == "cursor" or evento == "stop":
         guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
     cfg = ler_config()
-    if not cfg["ativo"] or (evento == "tool" and not cfg.get("intermediarias", True)):
-        return
+    if not cfg["ativo"] or PAUSADO.exists() or (evento == "tool" and not cfg.get("intermediarias", True)):
+        return  # desligada ou pausada: nada entra na fila
     transcript = dados.get("transcript_path") or ""
     final = ""
     if origem == "cursor":

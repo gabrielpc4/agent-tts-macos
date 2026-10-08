@@ -196,6 +196,9 @@ def atalho_selecao() -> None:
 
 
 if __name__ == "__main__":
+    # ao abrir (login ou reinício), começa desligada e sem pausa pendurada
+    tts.salvar_config(dict(tts.ler_config(), ativo=False))
+    tts.PAUSADO.unlink(missing_ok=True)
     import ApplicationServices
     if not ApplicationServices.AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True}):
         tts.log("menubar sem permissão de acessibilidade: Falar seleção vai pedir no primeiro uso")
