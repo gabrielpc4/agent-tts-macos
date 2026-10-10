@@ -10,6 +10,7 @@ Comandos:
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
   tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
+  tts modo                 "voz" se a leitura está ligada e não pausada, senão "tela"
   tts selecao              lê o texto selecionado no app em foco (atalho global: ⌥Esc)
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
@@ -1214,6 +1215,8 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
+    elif cmd == "modo":  # para os agentes escolherem as skills speak (voz) ou read (tela)
+        print("voz" if cfg["ativo"] and not PAUSADO.exists() else "tela")
     elif cmd == "selecao":
         print(falar_selecao().capitalize() + ".")
     elif cmd == "pausa":
