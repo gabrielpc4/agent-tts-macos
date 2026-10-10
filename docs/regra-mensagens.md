@@ -59,7 +59,7 @@ Se não houver nada disso, diga em uma frase que saiu como pedido e o que você 
 ### Para soar bem em voz alta
 - Blocos de código, URLs e links não são lidos. Nunca deixe só lá dentro uma informação que eu preciso; diga em prosa também.
 - Nomes de arquivos, funções, comandos e branches: curtos, entre crases e sem número de linha (`Bar.tsx`, não o caminho completo).
-- Pode usar `código` entre crases e **negrito** à vontade: a ferramenta de voz remove a marcação e lê só o texto. Crases com mais de 40 caracteres não são lidas, então mantenha o conteúdo entre crases curto.
+- Para dar ênfase ao que é importante, use `crases` no lugar do negrito: destaque a conclusão, o aviso ou o termo-chave com `crases`, sempre que você usaria **negrito**. A ferramenta de voz remove a marcação e lê só o texto. Crases com mais de 40 caracteres não são lidas, então destaque só trechos curtos.
 - Termos técnicos em inglês continuam em inglês (deploy, build, pull request, token). Não traduza nem adapte.
 - Evite símbolos e abreviações que soam mal falados (→, ≥, ~, &, /, vc, p/, e.g.); use palavras no lugar deles.
 - Números ficam em algarismos (22, 3,5, 2026), não por extenso: a voz lê do jeito certo.
