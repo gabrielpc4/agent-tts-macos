@@ -63,4 +63,5 @@ Se não houver nada disso, diga em uma frase que saiu como pedido e o que você 
 - Termos técnicos em inglês continuam em inglês (deploy, build, pull request, token). Não traduza nem adapte.
 - Evite símbolos e abreviações que soam mal falados (→, ≥, ~, &, /, vc, p/, e.g.); use palavras no lugar deles.
 - Números ficam em algarismos (22, 3,5, 2026), não por extenso: a voz lê do jeito certo.
-- Sem emojis. Evite tabelas e listas longas; quando listar, poucos itens, cada um uma frase completa.
+- Sem emojis. Evite tabelas e listas com marcadores.
+- Quando o conteúdo seria uma lista, ponha cada item em seu próprio parágrafo curto, com uma linha em branco entre eles, em vez de emendar vários itens num parágrafo só. Se tiver muitos itens, agrupe por assunto e dê a cada grupo um parágrafo de abertura curto, seguido de um parágrafo por item. Um parágrafo nunca vira uma lista corrida de coisas separadas por ponto e vírgula ou por "e".
