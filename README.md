@@ -11,7 +11,6 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 - **Never silent, never overlapping** — one playback queue and one audio output; if Gemini fails it falls back to Microsoft's free neural voices, then to the macOS `say` voice.
 - **Menu bar control** — on/off, voice (30 options), speed, final answers only or with progress notes, stop, repeat, and **Speak now** (finds the latest final answer in any of the three tools).
 - Code blocks, URLs, emojis and file paths are cleaned up before speaking.
-- **Plan usage at the end** — after each final answer it says the remaining % of your plan: weekly for Claude Code and Codex, monthly for Cursor (just the number, e.g. "65"). Turn off with `"falar_limite": false`.
 
 ## Requirements
 
@@ -92,7 +91,6 @@ Long texts are split into ~1500-character parts and streamed back to back. Gemin
 | `intermediarias` | `true` | `false` reads only final answers |
 | `modelo` | `gemini-3.8-flash-tts` | or `gemini-3.8-flash-lite-tts` |
 | `max_caracteres` | `0` | 0 reads the whole answer (each 3000 characters is one request); a number cuts the speech at a sentence boundary |
-| `falar_limite` | `true` | Say the remaining plan % after final answers |
 | `silencio_inicial_ms` | `600` | Silence played before each utterance so the speakers wake up and the first word isn't swallowed |
 | `estilo` | PT-BR style prompt | Instruction sent to Gemini (language, pace, pronunciation) |
 | `voz_reserva` | `pt-BR-ThalitaMultilingualNeural` | Microsoft fallback voice (`edge-tts --list-voices`) |

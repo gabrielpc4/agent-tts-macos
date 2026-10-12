@@ -10,7 +10,6 @@ Comandos:
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
   tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
-  tts modo                 "voz" se a leitura está ligada e não pausada, senão "tela"
   tts selecao              lê o texto selecionado no app em foco (atalho global: ⌥Esc)
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
@@ -62,8 +61,7 @@ PADRAO = {
     "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
     "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
     "max_caracteres": 0,         # 0 = lê a resposta inteira (cada 3 mil caracteres viram um pedido)
-    "silencio_inicial_ms": 600,
-    "falar_limite": True,        # no fim da resposta final, fala o % restante do plano (semana ou mês)  # o alto-falante leva um instante para acordar e engolia a 1ª palavra  # respostas maiores são cortadas no fim de uma frase
+    "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
     "voz_offline": "Luciana",
 }
@@ -864,8 +862,6 @@ def hook(origem: str, evento: str) -> None:
     for t in novos:
         e_final = t is final
         falar = t
-        if e_final:
-            falar = com_limite(falar, origem, transcript)
         log(f"hook origem={origem} evento={evento} final={e_final} "
             f"chars={len(t)}->{len(falar)}")
         enfileirar(falar)
@@ -977,105 +973,10 @@ def falar_agora() -> str:
         return "Não achei nenhuma resposta final."
     ts, origem, texto = achado
     parar()
-    falar = com_limite(texto, origem.split()[0])
+    falar = texto
     log(f"agora origem={origem} chars={len(texto)}->{len(falar)}")
     enfileirar(falar)
     return f"Lendo a última resposta do {origem.capitalize()} ({time.strftime('%H:%M', time.localtime(ts))})."
-
-
-# ---------------------------------------------------------------- limite do plano
-
-def _restante(usado: float | None, reseta_em: float | None) -> int | None:
-    if usado is None:
-        return None
-    if reseta_em and time.time() > reseta_em:
-        return 100  # a janela já renovou desde a última leitura
-    return max(0, min(100, round(100 - usado)))
-
-
-def restante_claude() -> int | None:
-    """Semana do plano. Fontes, fica com a mais recente: o histórico de uso que o app desktop
-    grava e a barra de status do Claude Code no terminal (tts statusline)."""
-    leituras = []
-    try:
-        d = json.loads((Path.home() / "Library/Application Support/Claude/plan-usage-history.json").read_text())
-        amostra = max(d.get("samples", []), key=lambda a: a.get("t", 0))
-        if amostra.get("u", {}).get("sd") is not None:
-            leituras.append((amostra["t"] / 1000, amostra["u"]["sd"], None))
-    except (OSError, ValueError):
-        pass
-    try:
-        d = json.loads((BASE / "limites-claude.json").read_text())
-        semana = (d.get("rate_limits") or {}).get("seven_day") or {}
-        if semana.get("used_percentage") is not None:
-            leituras.append((d["ts"], semana["used_percentage"], semana.get("resets_at")))
-    except (OSError, ValueError, KeyError):
-        pass
-    if not leituras:
-        return None
-    ts, usado, reseta = max(leituras, key=lambda l: l[0])
-    if time.time() - ts > 12 * 3600:
-        return None  # velho demais para confiar
-    return _restante(usado, reseta)
-
-
-def restante_codex(transcript: str = "") -> int | None:
-    """Semana do plano, gravada pelo próprio Codex nos eventos token_count da sessão."""
-    arq = Path(transcript) if transcript and Path(transcript).exists() else \
-        mais_recente("~/.codex/sessions/*/*/*/*.jsonl")
-    if not arq:
-        return None
-    for e in reversed(ler_cauda(str(arq))):
-        limites = (e.get("payload") or {}).get("rate_limits")
-        if not limites:
-            continue
-        for janela in (limites.get("primary"), limites.get("secondary")):
-            if janela and janela.get("window_minutes") == 10080:
-                return _restante(janela.get("used_percent"), janela.get("resets_at"))
-        return None
-    return None
-
-
-def restante_cursor() -> int | None:
-    """Mês do plano, pelo mesmo resumo que o painel do Cursor usa (cache de 5 minutos)."""
-    cache = BASE / "limites-cursor.json"
-    try:
-        d = json.loads(cache.read_text())
-        if time.time() - d["ts"] < 300:
-            return d["restante"]
-    except (OSError, ValueError, KeyError):
-        pass
-    try:
-        import sqlite3
-        db = Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
-        token = con.execute("select value from ItemTable where key='cursorAuth/accessToken'").fetchone()[0]
-        corpo = token.split(".")[1]
-        uid = json.loads(base64.urlsafe_b64decode(corpo + "=" * (-len(corpo) % 4)))["sub"].split("|")[-1]
-        req = urllib.request.Request("https://cursor.com/api/usage-summary",
-                                     headers={"Cookie": f"WorkosCursorSessionToken={uid}%3A%3A{token}"})
-        resumo = json.loads(urllib.request.urlopen(req, timeout=4).read())
-        plano = (resumo.get("individualUsage") or {}).get("plan") or {}
-        fim = para_epoch(resumo.get("billingCycleEnd"), 0)
-        restante = _restante(plano.get("totalPercentUsed"), fim or None)
-    except Exception as e:
-        log(f"limite cursor: {str(e)[:150]}")
-        return None
-    cache.write_text(json.dumps({"ts": time.time(), "restante": restante}))
-    return restante
-
-
-def com_limite(texto: str, origem: str, transcript: str = "") -> str:
-    """Acrescenta o número no fim da fala (só o número, ex.: 65)."""
-    if not ler_config().get("falar_limite", True):
-        return texto
-    try:
-        n = {"claude": restante_claude, "cursor": restante_cursor}.get(origem, lambda: None)() \
-            if origem != "codex" else restante_codex(transcript)
-    except Exception as e:
-        log(f"limite {origem}: {e}")
-        n = None
-    return f"{texto.rstrip()}\n\n{n}." if n is not None else texto
 
 
 # ---------------------------------------------------------------- falar seleção
@@ -1215,8 +1116,6 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
-    elif cmd == "modo":  # para os agentes escolherem as skills speak (voz) ou read (tela)
-        print("voz" if cfg["ativo"] and not PAUSADO.exists() else "tela")
     elif cmd == "selecao":
         print(falar_selecao().capitalize() + ".")
     elif cmd == "pausa":
@@ -1226,13 +1125,6 @@ def main() -> None:
     elif cmd == "repetir":
         if not repetir_ultimo():
             sys.exit("Nada para repetir ainda.")
-    elif cmd == "statusline":  # barra de status do Claude Code: guarda os limites do plano
-        dados = json.loads(sys.stdin.read() or "{}")
-        if dados.get("rate_limits"):
-            (BASE / "limites-claude.json").write_text(json.dumps(
-                {"ts": time.time(), "rate_limits": dados["rate_limits"]}))
-        semana = ((dados.get("rate_limits") or {}).get("seven_day") or {}).get("used_percentage")
-        print(f"semana: {100 - round(semana)}% restante" if semana is not None else "")
     elif cmd == "autoteste":
         import autoteste
         sys.exit(0 if autoteste.main() else 1)
