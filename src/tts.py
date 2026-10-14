@@ -18,7 +18,7 @@ Comandos:
   tts testar               fala uma frase de teste
   tts dizer "texto"        fala um texto qualquer
   tts log                  mostra as últimas linhas do log
-  tts chave gemini         guarda no cofre do sistema a chave copiada (e limpa a área de transferência)
+  tts chave gemini [arquivo]  guarda no cofre do sistema a chave copiada, ou lida de um arquivo (apagado depois)
   tts diagnostico          confere ffmpeg, áudio, chave, hooks e dependências
   tts autoteste            confere integridade, sobreposição e silêncio entre falas
 
@@ -1038,18 +1038,24 @@ def falar_selecao() -> str:
 
 # ---------------------------------------------------------------- chave e diagnóstico
 
-def guardar_chave_da_area_de_transferencia(nome: str) -> str:
+def guardar_chave_da_area_de_transferencia(nome: str, arquivo: str = "") -> str:
+    """Guarda a chave copiada (ou lida de um arquivo, que é apagado depois de importado)."""
     servico = {"gemini": "tts-gemini", "elevenlabs": "tts-elevenlabs"}.get(nome)
     if not servico:
-        sys.exit("Use: tts chave gemini")
-    valor = "".join(plataforma.ler_area_de_transferencia().split())
+        sys.exit("Use: tts chave gemini [arquivo]")
+    origem = Path(arquivo) if arquivo else None
+    texto = origem.read_text(encoding="utf-8-sig") if origem else plataforma.ler_area_de_transferencia()
+    valor = "".join(texto.split())
     if len(valor) < 20:
-        sys.exit("A área de transferência não parece ter uma chave. Copie a chave e rode de novo.")
+        sys.exit("Não achei uma chave " + ("no arquivo." if origem else "na área de transferência. Copie a chave e rode de novo."))
     if servico == "tts-elevenlabs" and not valor.startswith("sk_"):
         sys.exit("Isso não parece uma chave do ElevenLabs (elas começam com sk_). Nada foi salvo.")
     if servico == "tts-gemini" and valor.startswith("sk_"):
         sys.exit("Isso parece uma chave do ElevenLabs, não do Gemini. Nada foi salvo.")
     plataforma.guardar_chave(servico, valor)
+    if origem:
+        origem.unlink(missing_ok=True)
+        return f"{servico} salva ({valor[:4]}…, {len(valor)} caracteres). Arquivo da chave apagado."
     plataforma.limpar_area_de_transferencia()
     return f"{servico} salva ({valor[:4]}…, {len(valor)} caracteres). Área de transferência limpa."
 
@@ -1166,7 +1172,7 @@ def main() -> None:
         if not repetir_ultimo():
             sys.exit("Nada para repetir ainda.")
     elif cmd == "chave":
-        print(guardar_chave_da_area_de_transferencia(a[1] if len(a) > 1 else ""))
+        print(guardar_chave_da_area_de_transferencia(a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else ""))
     elif cmd == "diagnostico":
         sys.exit(0 if diagnostico() else 1)
     elif cmd == "autoteste":

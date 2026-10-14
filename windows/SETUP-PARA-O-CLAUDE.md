@@ -32,7 +32,11 @@ Também há duas coisas separadas para instalar: a ferramenta de voz (pasta `tts
    ```
    Isso copia as quatro skills (`speak-work`, `speak-personal`, `read-work`, `read-personal`) para `%USERPROFILE%\.claude\skills` e acrescenta o bloco da regra global ao `CLAUDE.md`, sem apagar o resto.
 
-4. **Chave do Gemini.** Peça ao Gabriel para criar ou copiar a chave em https://aistudio.google.com/apikey (o projeto precisa de faturamento ativo; o plano grátis só permite 10 pedidos por dia), copiá-la para a área de transferência e te avisar. Então rode `tts chave gemini`. Confira só a mensagem de sucesso, que mostra 4 caracteres e o tamanho. Sem a chave a ferramenta usa a voz grátis da Microsoft, então dá para validar o resto antes.
+4. **Chave do Gemini.** Se existir a pasta `chave` ao lado deste guia, ela traz `tts-gemini.txt` com a chave do Gabriel. Importe sem mostrá-la:
+   ```powershell
+   tts chave gemini chave\tts-gemini.txt
+   ```
+   O comando guarda a chave no Gerenciador de Credenciais e **apaga o arquivo**. Confira só a mensagem de sucesso (4 caracteres e o tamanho); nunca abra, imprima nem copie o conteúdo do arquivo. Se a pasta `chave` não existir, peça ao Gabriel para criar ou copiar a chave em https://aistudio.google.com/apikey (o projeto precisa de faturamento ativo; o plano grátis só permite 10 pedidos por dia), copiá-la e te avisar; então rode `tts chave gemini`, que lê a área de transferência. Sem a chave a ferramenta usa a voz grátis da Microsoft, então dá para validar o resto antes.
 
 ## Conferência (faça tudo e reporte)
 
