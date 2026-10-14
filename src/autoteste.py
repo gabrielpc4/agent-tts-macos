@@ -70,7 +70,7 @@ def teste_ao_vivo() -> bool:
             time.sleep(0.02)
         tts.enfileirar(texto)
     esperar_fila(60)
-    linhas = [l for l in tts.LOG.read_text().splitlines()
+    linhas = [l for l in tts.LOG.read_text(encoding="utf-8").splitlines()
               if l[:19] >= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(marca))]
     fins = [l for l in linhas if " fim motor=" in l]
     erros = [l for l in linhas if "erro" in l or "fechou antes" in l]

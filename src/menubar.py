@@ -23,7 +23,7 @@ MODELOS = {
 
 def falando() -> bool:
     try:
-        os.kill(int(tts.PIDFILE.read_text()), 0)
+        os.kill(int(tts.PIDFILE.read_text(encoding="utf-8")), 0)
         return True
     except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
         return False

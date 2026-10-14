@@ -1,6 +1,6 @@
 # agent-tts-macos
 
-Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** and **Cursor** write in chat — the progress notes between tool calls and the final answer — with a natural voice that pronounces English technical terms correctly in the middle of another language.
+Hear your coding agents. Reads aloud, on macOS and Windows, what **Claude Code**, **Codex** and **Cursor** write in chat — the progress notes between tool calls and the final answer — with a natural voice that pronounces English technical terms correctly in the middle of another language.
 
 > 🇧🇷 O projeto nasceu em português: a interface, os comandos e a voz padrão são PT-BR. A seção [Em português](#em-português) resume a instalação. Para outro idioma, veja [Other languages](#other-languages).
 
@@ -14,7 +14,7 @@ Hear your coding agents. Reads aloud, on macOS, what **Claude Code**, **Codex** 
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel) with [Homebrew](https://brew.sh): `brew install python ffmpeg`
+- macOS (Apple Silicon or Intel) with [Homebrew](https://brew.sh): `brew install python ffmpeg` — or Windows 10/11, see [Windows](#windows)
 - At least one of: Claude Code (CLI or desktop), Codex (CLI, IDE or desktop app), Cursor.
 - Optional but recommended: a **Gemini API key with billing enabled**. The free tier allows only ~10 TTS requests per day, which is not enough. Cost is about US$ 0.80 per hour of speech (Gemini 3.8 Flash TTS, 2026 pricing). Without a key, the free Microsoft voice is used. Even when paying, Tier 1 accounts are capped at about 100 TTS requests per day per model; when Flash hits it, the app switches to Flash-Lite (separate quota) and only then to Microsoft, until Google's reset time.
 
@@ -40,6 +40,19 @@ Then:
 - **Test:** `tts testar` speaks a sample sentence. `tts autoteste` runs a full diagnostic.
 
 Re-running `./install.sh` is safe (it updates in place). `./uninstall.sh` removes everything except the Keychain entry.
+
+## Windows
+
+There is a Windows port: system tray icon, global shortcuts (Ctrl+Alt+P pause, Ctrl+Alt+S speak selection), Windows Credential Manager for the key, and SAPI as the offline voice. **It was written on a Mac and has not been run on Windows yet**, so expect small fixes.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\install.ps1
+tts chave gemini     # after copying your Gemini key
+tts diagnostico      # checks ffmpeg, audio, key, hooks and dependencies
+tts autoteste        # plays three test utterances
+```
+
+Needs Python 3.10+, ffmpeg and Git for Windows (Claude Code runs hooks in its bash). Full step-by-step and a troubleshooting table, written so another Claude can set everything up: [`windows/SETUP-PARA-O-CLAUDE.md`](windows/SETUP-PARA-O-CLAUDE.md).
 
 ## Usage
 

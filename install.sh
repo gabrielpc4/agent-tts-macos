@@ -13,7 +13,7 @@ done
 
 echo "→ Copiando arquivos para $BASE"
 mkdir -p "$BASE"
-cp src/tts.py src/menubar.py src/autoteste.py src/salvar_chave.sh src/configurar_hooks.py "$BASE/"
+cp src/tts.py src/plataforma.py src/menubar.py src/autoteste.py src/salvar_chave.sh src/configurar_hooks.py "$BASE/"
 chmod +x "$BASE/salvar_chave.sh"
 
 echo "→ Criando o ambiente Python (edge-tts, rumps, sounddevice, quickmachotkey)"

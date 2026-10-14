@@ -15,12 +15,16 @@ MARCA = ".tts-agentes"
 
 
 def comando(*args: str) -> str:
+    if sys.platform == "win32":
+        # Os hooks do Claude Code rodam no bash do Git for Windows: barras normais e aspas nos caminhos
+        python = (BASE / ".venv" / "Scripts" / "python.exe").as_posix()
+        return f'"{python}" "{(BASE / "tts.py").as_posix()}" hook ' + " ".join(args)
     return f"{BASE}/.venv/bin/python {BASE}/tts.py hook " + " ".join(args)
 
 
 def ler(caminho: Path) -> dict:
     try:
-        return json.loads(caminho.read_text())
+        return json.loads(caminho.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
 
@@ -31,7 +35,7 @@ def gravar(caminho: Path, dados: dict) -> None:
         if not backup.exists():
             shutil.copy(caminho, backup)
     caminho.parent.mkdir(parents=True, exist_ok=True)
-    caminho.write_text(json.dumps(dados, indent=2, ensure_ascii=False) + "\n")
+    caminho.write_text(json.dumps(dados, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def sem_os_nossos(lista: list) -> list:
@@ -69,13 +73,16 @@ def main(acao: str) -> None:
         "Stop": claude("stop"),
         "PostToolUse": {"matcher": "*", **claude("tool")},
     } if instalar else {})
-    configurar(HOME / ".codex/hooks.json", {
-        "Stop": codex("stop"),
-        "PostToolUse": codex("tool"),
-    } if instalar else {})
-    configurar(HOME / ".cursor/hooks.json", {
-        "afterAgentResponse": {"command": comando("cursor", "resposta")},
-    } if instalar else {}, extra={"version": 1})
+    # Codex e Cursor só são configurados se já estiverem instalados (a pasta de configuração existe)
+    if (HOME / ".codex").exists():
+        configurar(HOME / ".codex/hooks.json", {
+            "Stop": codex("stop"),
+            "PostToolUse": codex("tool"),
+        } if instalar else {})
+    if (HOME / ".cursor").exists():
+        configurar(HOME / ".cursor/hooks.json", {
+            "afterAgentResponse": {"command": comando("cursor", "resposta")},
+        } if instalar else {}, extra={"version": 1})
 
 
 if __name__ == "__main__":

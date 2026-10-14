@@ -18,12 +18,13 @@ Comandos:
   tts testar               fala uma frase de teste
   tts dizer "texto"        fala um texto qualquer
   tts log                  mostra as últimas linhas do log
+  tts chave gemini         guarda no cofre do sistema a chave copiada (e limpa a área de transferência)
+  tts diagnostico          confere ffmpeg, áudio, chave, hooks e dependências
   tts autoteste            confere integridade, sobreposição e silêncio entre falas
 
 Uso interno (hooks):  tts hook claude|codex stop|tool  ·  tts hook cursor   (JSON do hook no stdin)
 """
 import base64
-import fcntl
 import glob
 import hashlib
 import json
@@ -31,7 +32,6 @@ import os
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -43,6 +43,11 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
+import plataforma
+from plataforma import MAC, WINDOWS, TravaArquivo, sem_janela
+
+plataforma.preparar_console()
+
 BASE = Path.home() / ".tts-agentes"
 CONFIG = BASE / "config.json"
 PIDFILE = BASE / "worker.pid"
@@ -51,7 +56,7 @@ FILA = BASE / "fila"
 ESTADO = BASE / "estado"
 LOG = BASE / "tts.log"
 ULTIMO = BASE / "ultimo"  # ultimo.wav / ultimo.mp3 / ultimo.aiff
-PYTHON = BASE / ".venv" / "bin" / "python"
+PYTHON = plataforma.python_do_venv(BASE)
 
 PADRAO = {
     "ativo": True,
@@ -63,7 +68,7 @@ PADRAO = {
     "max_caracteres": 0,         # 0 = lê a resposta inteira (cada 3 mil caracteres viram um pedido)
     "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
-    "voz_offline": "Luciana",
+    "voz_offline": plataforma.voz_offline_padrao(),
 }
 
 VOZES_GEMINI = {
@@ -97,20 +102,20 @@ FRASE_TESTE = (
 
 def ler_config() -> dict:
     try:
-        return {**PADRAO, **json.loads(CONFIG.read_text())}
+        return {**PADRAO, **json.loads(CONFIG.read_text(encoding="utf-8"))}
     except (FileNotFoundError, json.JSONDecodeError):
         return dict(PADRAO)
 
 
 def salvar_config(cfg: dict) -> None:
-    CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def log(msg: str) -> None:
     try:
         if LOG.exists() and LOG.stat().st_size > 200_000:
-            LOG.write_text(LOG.read_text()[-50_000:])
-        with LOG.open("a") as f:
+            LOG.write_text(LOG.read_text(encoding="utf-8")[-50_000:])
+        with LOG.open("a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass
@@ -171,34 +176,24 @@ def limpar(texto: str, limite: int = 0) -> str:
 
 # ---------------------------------------------------------------- motores (streaming)
 
-def binario(nome: str) -> str:
-    """Acha um executável mesmo com o PATH mínimo dos hooks (Homebrew Apple Silicon ou Intel)."""
-    for candidato in (shutil.which(nome), f"/opt/homebrew/bin/{nome}", f"/usr/local/bin/{nome}"):
-        if candidato and Path(candidato).exists():
-            return candidato
-    return nome
+binario = plataforma.binario
 
 
 FFMPEG = binario("ffmpeg")
 SEGMENTO_MAX = 3000  # caracteres por pedido ao Gemini (a cota é por pedido, então menos pedidos é melhor)
 
 
-CHAVEIRO_LOGIN = Path.home() / "Library/Keychains/login.keychain-db"
-
-
 def chave(servico: str) -> str | None:
-    """Lê só do chaveiro de login. Procurar em todos faz o macOS pedir a senha de chaveiros
-    trancados (como os temporários do fastlane/EAS) a cada login."""
-    r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", servico, "-w",
-                        str(CHAVEIRO_LOGIN)], capture_output=True, text=True)
+    """Lê a chave do cofre do sistema (macOS: chaveiro de login; Windows: Gerenciador de Credenciais)."""
+    valor = plataforma.ler_chave(servico)
     aviso = BASE / f"sem-{servico}"
-    if not r.stdout.strip():
+    if not valor:
         if not aviso.exists():
-            log(f"chave {servico} não está no chaveiro de login: usando a voz reserva")
+            log(f"chave {servico} não encontrada: usando a voz reserva")
         aviso.touch()
         return None
     aviso.unlink(missing_ok=True)
-    return r.stdout.strip()
+    return valor
 
 
 def gemini_stream(texto: str, voz: str, modelo: str, estilo: str = ESTILO):
@@ -258,7 +253,7 @@ def pausar_gemini(erro: str, modelo: str) -> None:
         for valor, unidade in re.findall(r"([\d.]+)([hms])", m.group(1)):
             segundos += float(valor) * {"h": 3600, "m": 60, "s": 1}[unidade]
     segundos = segundos + 5 if segundos else 120
-    arquivo_pausa(modelo).write_text(str(time.time() + segundos))
+    arquivo_pausa(modelo).write_text(str(time.time() + segundos), encoding="utf-8")
     log(f"{modelo} pausado por {segundos / 60:.0f} min (limite de uso)")
 
 
@@ -266,7 +261,7 @@ def gemini_pausado(modelo: str | None = None) -> bool:
     """Sem modelo: True só se todos os modelos estiverem pausados."""
     def pausado(m: str) -> bool:
         try:
-            return time.time() < float(arquivo_pausa(m).read_text())
+            return time.time() < float(arquivo_pausa(m).read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return False
     return pausado(modelo) if modelo else all(pausado(m) for m in MODELOS_GEMINI)
@@ -274,7 +269,7 @@ def gemini_pausado(modelo: str | None = None) -> bool:
 
 def pausa_ate(modelo: str) -> float | None:
     try:
-        ate = float(arquivo_pausa(modelo).read_text())
+        ate = float(arquivo_pausa(modelo).read_text(encoding="utf-8"))
         return ate if ate > time.time() else None
     except (FileNotFoundError, ValueError):
         return None
@@ -293,13 +288,8 @@ def edge_stream(texto: str, voz: str, entregar) -> None:
 
 
 def say_pcm(texto: str, voz: str) -> bytes:
-    """Última reserva, offline: voz do macOS no mesmo formato PCM do Gemini."""
-    with tempfile.TemporaryDirectory() as td:
-        wav = Path(td) / "say.wav"
-        subprocess.run(["/usr/bin/say", "-v", voz, "-r", "210", "-o", str(wav),
-                        "--data-format=LEI16@24000", texto], check=True)
-        with wave.open(str(wav)) as w:
-            return w.readframes(w.getnframes())
+    """Última reserva, offline: voz do sistema no mesmo formato PCM do Gemini."""
+    return plataforma.voz_offline_pcm(texto, voz)
 
 
 def segmentar(texto: str, maximo: int = SEGMENTO_MAX) -> list[str]:
@@ -486,7 +476,7 @@ class Conversor:
         self.proc = subprocess.Popen([FFMPEG, "-loglevel", "quiet", *entrada, *filtro,
                                       "-f", "s16le", "-ar", str(TAXA), "-ac", "1", "pipe:1"],
                                      stdin=subprocess.DEVNULL if arquivo else subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **sem_janela())
         self.leitor = threading.Thread(target=self._ler, args=(saida,), daemon=True)
         self.leitor.start()
 
@@ -598,19 +588,17 @@ def repetir_ultimo() -> bool:
     FILA.mkdir(parents=True, exist_ok=True)
     copia = FILA / f"repetir-{time.time_ns()}{ultimo.suffix}"
     shutil.copy(ultimo, copia)
-    (FILA / f"{time.time_ns()}.ref").write_text(str(copia))
+    (FILA / f"{time.time_ns()}.ref").write_text(str(copia), encoding="utf-8")
     iniciar_worker()
     return True
 
 
 def worker_ativo() -> int | None:
     try:
-        pid = int(PIDFILE.read_text())
-        cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
-                             capture_output=True, text=True).stdout
-        return pid if "tts.py _worker" in cmd else None
+        pid = int(PIDFILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         return None
+    return pid if "tts.py _worker" in plataforma.comando_do_processo(pid) else None
 
 
 def pausar() -> bool:
@@ -641,27 +629,19 @@ def parar() -> bool:
     PAUSADO.unlink(missing_ok=True)
     pid = worker_ativo()
     if pid:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-            for _ in range(40):
-                os.kill(pid, 0)
-                time.sleep(0.05)
-        except (ProcessLookupError, PermissionError):
-            pass
+        plataforma.encerrar_arvore(pid)
     PIDFILE.unlink(missing_ok=True)
     return bool(pid)
 
 
 def enfileirar(texto: str) -> None:
     FILA.mkdir(parents=True, exist_ok=True)
-    (FILA / f"{time.time_ns()}.txt").write_text(texto)
+    (FILA / f"{time.time_ns()}.txt").write_text(texto, encoding="utf-8")
     iniciar_worker()
 
 
 def iniciar_worker() -> None:
-    subprocess.Popen([str(PYTHON), str(Path(__file__).resolve()), "_worker"],
-                     start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    plataforma.iniciar_destacado([str(PYTHON), str(Path(__file__).resolve()), "_worker"])
 
 
 def proximo_item() -> "Item | ItemArquivo | None":
@@ -669,7 +649,7 @@ def proximo_item() -> "Item | ItemArquivo | None":
         if arquivo.suffix not in (".txt", ".ref"):
             continue
         try:
-            conteudo = arquivo.read_text()
+            conteudo = arquivo.read_text(encoding="utf-8")
             arquivo.unlink()
         except FileNotFoundError:
             continue
@@ -688,12 +668,10 @@ def proximo_item() -> "Item | ItemArquivo | None":
 def worker() -> None:
     """Um único worker por vez esvazia a fila. Um alimentador pega cada fala assim que ela
     chega e já começa a gerar o áudio (até 2 à frente), enquanto a atual toca."""
-    lock = LOCK.open("w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    lock = TravaArquivo(LOCK)
+    if not lock.tentar():
         return  # outro worker já está cuidando da fila
-    PIDFILE.write_text(str(os.getpid()))
+    PIDFILE.write_text(str(os.getpid()), encoding="utf-8")
     prontos: queue.Queue = queue.Queue(maxsize=2)
     trava, encerrar = threading.Lock(), threading.Event()
 
@@ -727,7 +705,7 @@ def worker() -> None:
         if saida:
             saida.fechar()
         PIDFILE.unlink(missing_ok=True)
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.soltar()
         if any(FILA.glob("*.txt")) or any(FILA.glob("*.ref")):  # chegou algo enquanto saíamos
             iniciar_worker()
 
@@ -782,7 +760,7 @@ def textos_turno_claude(caminho: str) -> list[str]:
 def e_subagente_codex(caminho: str) -> bool:
     """O cabeçalho da sessão do Codex marca subagentes (thread_source = subagent)."""
     try:
-        with open(caminho) as f:
+        with open(caminho, encoding="utf-8") as f:
             meta = json.loads(f.readline()).get("payload") or {}
     except (OSError, ValueError):
         return False
@@ -811,10 +789,9 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
         if time.time() - velho.stat().st_mtime > 3 * 86400:
             velho.unlink(missing_ok=True)
     arq = ESTADO / (re.sub(r"[^\w-]", "_", sessao) + ".json")
-    with open(BASE / "estado.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with TravaArquivo(BASE / "estado.lock"):
         try:
-            vistos = set(json.loads(arq.read_text()))
+            vistos = set(json.loads(arq.read_text(encoding="utf-8")))
         except (FileNotFoundError, json.JSONDecodeError):
             vistos = set()
         novos = []
@@ -823,7 +800,7 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
             if h not in vistos:
                 vistos.add(h)
                 novos.append(t)
-        arq.write_text(json.dumps(sorted(vistos)))
+        arq.write_text(json.dumps(sorted(vistos)), encoding="utf-8")
     return novos
 
 
@@ -876,7 +853,7 @@ def guardar_ultima_final(origem: str, texto: str) -> None:
     if texto.strip():
         ULTIMAS.mkdir(parents=True, exist_ok=True)
         (ULTIMAS / f"{origem}.json").write_text(
-            json.dumps({"ts": time.time(), "texto": texto}, ensure_ascii=False))
+            json.dumps({"ts": time.time(), "texto": texto}, ensure_ascii=False), encoding="utf-8")
 
 
 def mais_recente(*padroes: str) -> Path | None:
@@ -953,7 +930,7 @@ def ultima_final() -> tuple[float, str, str] | None:
     candidatos = []
     for arq in ULTIMAS.glob("*.json"):
         try:
-            d = json.loads(arq.read_text())
+            d = json.loads(arq.read_text(encoding="utf-8"))
             candidatos.append((d["ts"] + 2, arq.stem, d["texto"]))  # empate: o hook é mais fiel
         except (OSError, ValueError, KeyError):
             pass
@@ -1029,6 +1006,9 @@ def _selecao_por_copia() -> str:
 
 
 def texto_selecionado() -> str:
+    if WINDOWS:
+        import win_integracao
+        return win_integracao.texto_selecionado()
     try:
         texto = _selecao_por_acessibilidade()
     except Exception as e:
@@ -1054,6 +1034,66 @@ def falar_selecao() -> str:
     log(f"seleção chars={len(texto)}")
     enfileirar(texto)
     return "lendo a seleção"
+
+
+# ---------------------------------------------------------------- chave e diagnóstico
+
+def guardar_chave_da_area_de_transferencia(nome: str) -> str:
+    servico = {"gemini": "tts-gemini", "elevenlabs": "tts-elevenlabs"}.get(nome)
+    if not servico:
+        sys.exit("Use: tts chave gemini")
+    valor = "".join(plataforma.ler_area_de_transferencia().split())
+    if len(valor) < 20:
+        sys.exit("A área de transferência não parece ter uma chave. Copie a chave e rode de novo.")
+    if servico == "tts-elevenlabs" and not valor.startswith("sk_"):
+        sys.exit("Isso não parece uma chave do ElevenLabs (elas começam com sk_). Nada foi salvo.")
+    if servico == "tts-gemini" and valor.startswith("sk_"):
+        sys.exit("Isso parece uma chave do ElevenLabs, não do Gemini. Nada foi salvo.")
+    plataforma.guardar_chave(servico, valor)
+    plataforma.limpar_area_de_transferencia()
+    return f"{servico} salva ({valor[:4]}…, {len(valor)} caracteres). Área de transferência limpa."
+
+
+def diagnostico() -> bool:
+    """Confere o que o tts precisa para funcionar neste computador."""
+    ok = True
+
+    def linha(nome: str, bom: bool, detalhe: str = "") -> None:
+        nonlocal ok
+        ok &= bom
+        print(f"  {'✅' if bom else '❌'} {nome}{': ' + detalhe if detalhe else ''}")
+
+    print(f"Sistema: {sys.platform} · Python {sys.version.split()[0]}")
+    for programa in ("ffmpeg", "ffprobe"):
+        caminho = plataforma.binario(programa)
+        linha(programa, bool(shutil.which(caminho) or Path(caminho).exists()), caminho)
+    try:
+        import sounddevice as sd
+        linha("saída de áudio", True, sd.query_devices(kind="output")["name"])
+    except Exception as e:
+        linha("saída de áudio", False, str(e)[:100])
+    try:
+        import edge_tts  # noqa: F401
+        linha("edge-tts (voz reserva)", True)
+    except ImportError:
+        linha("edge-tts (voz reserva)", False, "pip install edge-tts")
+    linha("chave do Gemini", bool(plataforma.ler_chave("tts-gemini")),
+          "" if plataforma.ler_chave("tts-gemini") else "rode: tts chave gemini")
+    if WINDOWS:
+        for modulo in ("keyring", "psutil", "pystray", "PIL"):
+            try:
+                __import__(modulo)
+                linha(modulo, True)
+            except ImportError:
+                linha(modulo, False, "pip install")
+    configuracoes = {"Claude Code": Path.home() / ".claude/settings.json",
+                     "Codex": Path.home() / ".codex/hooks.json", "Cursor": Path.home() / ".cursor/hooks.json"}
+    for nome, caminho in configuracoes.items():
+        if caminho.exists():
+            linha(f"hooks do {nome}", "tts.py" in caminho.read_text(encoding="utf-8"),
+                  "" if "tts.py" in caminho.read_text(encoding="utf-8") else "rode configurar_hooks.py instalar")
+    print("Tudo certo." if ok else "Há itens para corrigir.")
+    return ok
 
 
 # ---------------------------------------------------------------- CLI
@@ -1125,6 +1165,10 @@ def main() -> None:
     elif cmd == "repetir":
         if not repetir_ultimo():
             sys.exit("Nada para repetir ainda.")
+    elif cmd == "chave":
+        print(guardar_chave_da_area_de_transferencia(a[1] if len(a) > 1 else ""))
+    elif cmd == "diagnostico":
+        sys.exit(0 if diagnostico() else 1)
     elif cmd == "autoteste":
         import autoteste
         sys.exit(0 if autoteste.main() else 1)
@@ -1136,7 +1180,7 @@ def main() -> None:
     elif cmd == "dizer":
         enfileirar(" ".join(a[1:]) or sys.stdin.read())
     elif cmd == "log":
-        print("\n".join(LOG.read_text().splitlines()[-20:]) if LOG.exists() else "(vazio)")
+        print("\n".join(LOG.read_text(encoding="utf-8").splitlines()[-20:]) if LOG.exists() else "(vazio)")
     else:
         print(__doc__)
 
