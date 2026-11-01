@@ -707,11 +707,19 @@ def worker() -> None:
     finally:
         encerrar.set()
         if saida:
-            saida.fechar()
+            # O stream.stop() do PortAudio já travou para sempre no CoreAudio (AudioOutputUnitStop preso
+            # num mutex): o worker ficava vivo e mudo, segurando o lock, e a fila só crescia. Fechar é
+            # cortesia (a fala já acabou), então espera no máximo 3 s e sai de qualquer jeito.
+            fechando = threading.Thread(target=saida.fechar, daemon=True)
+            fechando.start()
+            fechando.join(3)
+            if fechando.is_alive():
+                log("saída de áudio não fechou em 3 s: encerrando o worker à força")
         PIDFILE.unlink(missing_ok=True)
         lock.soltar()
         if any(FILA.glob("*.txt")) or any(FILA.glob("*.ref")):  # chegou algo enquanto saíamos
             iniciar_worker()
+        os._exit(0)  # sem isso, uma thread de áudio travada seguraria o processo
 
 
 # ---------------------------------------------------------------- hooks
