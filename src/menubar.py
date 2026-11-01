@@ -56,6 +56,10 @@ class App(rumps.App):
             item.vel = v
             self.menu_vel.add(item)
 
+        self.menu_conversas = rumps.MenuItem("Conversas")
+        self.menu_conversas.add(rumps.MenuItem("…"))  # o rumps só cria o submenu ao receber o primeiro item
+        self.assinatura_conversas = None
+
         self.menu_modelo = rumps.MenuItem("Modelo Gemini")
         for mid, desc in MODELOS.items():
             item = rumps.MenuItem(desc, callback=self.trocar_modelo)
@@ -69,6 +73,7 @@ class App(rumps.App):
             self.item_ativo,
             self.item_inter,
             self.item_sub,
+            self.menu_conversas,
             rumps.MenuItem("Parar fala", callback=self.parar, key="."),
             rumps.MenuItem("Repetir última", callback=self.repetir, key="r"),
             rumps.MenuItem("Testar voz", callback=self.testar, key="t"),
@@ -101,6 +106,31 @@ class App(rumps.App):
             item.state = int(item.modelo == cfg["modelo"])
         self.menu_voz.title = f"Voz: {cfg['voz']}"
         self.menu_vel.title = f"Velocidade: {cfg['velocidade']:.1f}x"
+        self.atualizar_conversas(cfg)
+
+    def atualizar_conversas(self, cfg):
+        """Refaz o submenu só quando a lista ou as marcas mudam (refazer com o menu aberto o pisca)."""
+        ativas = tts.conversas_ativas()
+        escolhidas = cfg.get("conversas_ouvir", [])
+        so = cfg.get("so_conversas_escolhidas", False)
+        assinatura = (so, tuple((c["id"], tts.nome_conversa(c), c["id"] in escolhidas) for c in ativas))
+        total = sum(c["id"] in escolhidas for c in ativas)
+        self.menu_conversas.title = f"Conversas: {total} de {len(ativas)}" if so else "Conversas: todas"
+        if assinatura == self.assinatura_conversas:
+            return
+        self.assinatura_conversas = assinatura
+        self.menu_conversas.clear()
+        filtro = rumps.MenuItem("Ouvir só as escolhidas", callback=self.alternar_filtro)
+        filtro.state = int(so)
+        self.menu_conversas.add(filtro)
+        self.menu_conversas.add(rumps.separator)
+        if not ativas:
+            self.menu_conversas.add(rumps.MenuItem("(nenhuma conversa ativa nas últimas 6 horas)"))
+        for c in ativas:
+            item = rumps.MenuItem(tts.nome_conversa(c), callback=self.alternar_conversa)
+            item.conversa = c["id"]
+            item.state = int(c["id"] in escolhidas)
+            self.menu_conversas.add(item)
 
     def tique(self, _):
         cfg = tts.ler_config()
@@ -141,6 +171,15 @@ class App(rumps.App):
 
     def alternar_sub(self, _):
         self.salvar(subagentes_codex=not tts.ler_config().get("subagentes_codex", False))
+
+    def alternar_filtro(self, _):
+        self.salvar(so_conversas_escolhidas=not tts.ler_config().get("so_conversas_escolhidas", False))
+
+    def alternar_conversa(self, item):
+        if not tts.ler_config().get("so_conversas_escolhidas"):
+            self.salvar(so_conversas_escolhidas=True)  # escolher uma conversa só faz sentido no modo "só as escolhidas"
+        tts.alternar_conversa(item.conversa)
+        self.atualizar_marcas()
 
     def trocar_voz(self, item):
         self.salvar(voz=item.voz)

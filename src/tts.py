@@ -10,6 +10,8 @@ Comandos:
   tts mais | menos         +0.1 / -0.1 na velocidade
   tts intermediarias on|off   lê ou pula os passos no meio do trabalho
   tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
+  tts conversas [on|off]   lista as conversas ativas; on = só as escolhidas falam, off = todas
+  tts ouvir <n|todas|nenhuma>  escolhe (ou tira) uma conversa da lista, pelo número de "tts conversas"
   tts selecao              lê o texto selecionado no app em foco (atalho global: ⌥Esc)
   tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
   tts parar                interrompe a fala atual
@@ -65,6 +67,8 @@ PADRAO = {
     "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
     "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
     "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
+    "so_conversas_escolhidas": False,  # True: só as conversas de "conversas_ouvir" falam
+    "conversas_ouvir": [],             # ids das conversas escolhidas para ouvir
     "max_caracteres": 0,         # 0 = lê a resposta inteira (cada 3 mil caracteres viram um pedido)
     "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra
     "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
@@ -816,6 +820,80 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
     return novos
 
 
+# ---------------------------------------------------------------- conversas (quais podem falar)
+
+CONVERSAS = BASE / "conversas"
+JANELA_CONVERSAS = 6 * 3600  # conversa "ativa" = o hook dela disparou nas últimas 6 horas
+
+
+def titulo_claude(caminho: str) -> str:
+    """Título da conversa no Claude Code: o nome dado a ela, ou o último pedido do usuário."""
+    titulo = pedido = ""
+    for e in ler_cauda(caminho, 400_000):
+        if e.get("type") == "custom-title":
+            titulo = e.get("customTitle") or titulo
+        elif e.get("type") == "last-prompt":
+            pedido = e.get("lastPrompt") or pedido
+    return titulo or pedido
+
+
+def registrar_conversa(origem: str, sessao: str, dados: dict) -> None:
+    """Anota que a conversa existe (mesmo desligada ou fora da lista), para aparecer no menu."""
+    pasta = dados.get("cwd") or next(iter(dados.get("workspace_roots") or []), "")
+    arq = CONVERSAS / (re.sub(r"[^\w-]", "_", f"{origem}-{sessao}") + ".json")
+    try:
+        CONVERSAS.mkdir(parents=True, exist_ok=True)
+        for velha in CONVERSAS.glob("*.json"):
+            if time.time() - velha.stat().st_mtime > 3 * 86400:
+                velha.unlink(missing_ok=True)
+        try:
+            antigo = json.loads(arq.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            antigo = {}
+        titulo = titulo_claude(dados.get("transcript_path") or "") if origem == "claude" else ""
+        arq.write_text(json.dumps({
+            "id": f"{origem}:{sessao}", "origem": origem, "ts": time.time(),
+            "pasta": Path(pasta).name if pasta else antigo.get("pasta", ""),
+            "titulo": (titulo or antigo.get("titulo", "")).strip()[:80],
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log(f"conversa não registrada: {e}")
+
+
+def conversas_ativas() -> list[dict]:
+    """Conversas vistas nas últimas horas, a mais recente primeiro."""
+    lista = []
+    for arq in CONVERSAS.glob("*.json"):
+        try:
+            c = json.loads(arq.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if time.time() - c.get("ts", 0) <= JANELA_CONVERSAS:
+            lista.append(c)
+    return sorted(lista, key=lambda c: c["ts"], reverse=True)
+
+
+def conversa_ouvida(cfg: dict, id_: str) -> bool:
+    return not cfg.get("so_conversas_escolhidas") or id_ in cfg.get("conversas_ouvir", [])
+
+
+def alternar_conversa(id_: str) -> bool:
+    """Liga ou desliga uma conversa na lista de escolhidas; devolve se ela passou a ser ouvida."""
+    cfg = ler_config()
+    ouvir = [i for i in cfg.get("conversas_ouvir", []) if i != id_]
+    entrou = id_ not in cfg.get("conversas_ouvir", [])
+    if entrou:
+        ouvir.append(id_)
+    salvar_config(dict(cfg, conversas_ouvir=ouvir))
+    return entrou
+
+
+def nome_conversa(c: dict) -> str:
+    base = c.get("titulo") or c.get("pasta") or c["id"].split(":", 1)[1][:8]
+    pasta = f" · {c['pasta']}" if c.get("titulo") and c.get("pasta") else ""
+    return f"{base}{pasta}  ({c['origem'].capitalize()})"
+
+
 def hook(origem: str, evento: str) -> None:
     try:
         dados = json.loads(sys.stdin.read() or "{}")
@@ -830,6 +908,8 @@ def hook(origem: str, evento: str) -> None:
     if origem == "cursor" or evento == "stop":
         guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
     cfg = ler_config()
+    sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
+    registrar_conversa(origem, sessao, dados)
     if not cfg["ativo"] or PAUSADO.exists() or (evento == "tool" and not cfg.get("intermediarias", True)):
         return  # desligada ou pausada: nada entra na fila
     transcript = dados.get("transcript_path") or ""
@@ -846,8 +926,9 @@ def hook(origem: str, evento: str) -> None:
                               if not final_limpo or not limpar(t, 10_000).startswith(final_limpo[:150])]
     if not cfg.get("intermediarias", True):
         intermediarias = []
-    sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
     novos = so_os_novos(sessao, [t for t in intermediarias + [final] if t.strip()])
+    if not conversa_ouvida(cfg, f"{origem}:{sessao}"):
+        return  # conversa não escolhida: o que ela disse conta como visto, para não vir de uma vez ao escolhê-la
     for t in novos:
         e_final = t is final
         falar = t
@@ -1174,6 +1255,30 @@ def main() -> None:
             cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
             salvar_config(cfg)
         print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
+    elif cmd in ("conversas", "ouvir"):
+        ativas = conversas_ativas()
+        if cmd == "conversas" and len(a) > 1:
+            cfg["so_conversas_escolhidas"] = a[1] in ("on", "sim", "ligar")
+            salvar_config(cfg)
+        elif cmd == "ouvir" and len(a) > 1:
+            if a[1] == "nenhuma":
+                salvar_config(dict(cfg, conversas_ouvir=[]))
+            elif a[1] == "todas":
+                salvar_config(dict(cfg, conversas_ouvir=[c["id"] for c in ativas]))
+            else:
+                alvo = next((c for i, c in enumerate(ativas, 1) if a[1] == str(i) or a[1] == c["id"]), None)
+                if not alvo:
+                    sys.exit(f"Conversa desconhecida: {a[1]}. Veja: tts conversas")
+                if not cfg["so_conversas_escolhidas"]:
+                    salvar_config(dict(cfg, so_conversas_escolhidas=True))
+                alternar_conversa(alvo["id"])
+        cfg = ler_config()
+        print("Modo: " + ("só as conversas escolhidas" if cfg["so_conversas_escolhidas"]
+                          else "todas as conversas (tts conversas on para escolher)"))
+        for i, c in enumerate(ativas, 1):
+            print(f"{'🔊' if c['id'] in cfg['conversas_ouvir'] else '  '} {i:>2}  {nome_conversa(c)}")
+        if not ativas:
+            print("(nenhuma conversa ativa nas últimas 6 horas)")
     elif cmd == "selecao":
         print(falar_selecao().capitalize() + ".")
     elif cmd == "pausa":
