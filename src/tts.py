@@ -827,7 +827,22 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
 # ---------------------------------------------------------------- conversas (quais podem falar)
 
 CONVERSAS = BASE / "conversas"
-JANELA_CONVERSAS = 6 * 3600  # conversa "ativa" = o hook dela disparou nas últimas 6 horas
+# Conversa "ativa": o processo dela ainda existe e o hook dela disparou há pouco. Duas horas sem nenhum evento
+# (nem ferramenta, nem fim de turno) é uma conversa parada esperando alguém: sai da lista e volta no próximo evento,
+# com a escolha guardada no config. Sem o processo para conferir (Codex, Cursor, registros antigos), 30 minutos.
+JANELA_CONVERSAS = 2 * 3600
+JANELA_SEM_PROCESSO = 30 * 60
+
+
+def sessao_sem_ninguem() -> bool:
+    """Execução sem ninguém olhando (claude -p, Agent SDK, os agentes do monitor). O Claude Code marca isso no
+    ambiente de cada processo: CLAUDE_CODE_SESSION_ATTENDED=0 no -p, 1 no app desktop e nos subagentes dele, e o
+    valor não é herdado de quem lançou (um -p disparado de dentro do desktop também vem com 0)."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0"
+
+
+def arquivo_conversa(origem: str, sessao: str) -> Path:
+    return CONVERSAS / (re.sub(r"[^\w-]", "_", f"{origem}-{sessao}") + ".json")
 
 
 def titulo_claude(caminho: str) -> str:
@@ -844,7 +859,7 @@ def titulo_claude(caminho: str) -> str:
 def registrar_conversa(origem: str, sessao: str, dados: dict) -> None:
     """Anota que a conversa existe (mesmo desligada ou fora da lista), para aparecer no menu."""
     pasta = dados.get("cwd") or next(iter(dados.get("workspace_roots") or []), "")
-    arq = CONVERSAS / (re.sub(r"[^\w-]", "_", f"{origem}-{sessao}") + ".json")
+    arq = arquivo_conversa(origem, sessao)
     try:
         CONVERSAS.mkdir(parents=True, exist_ok=True)
         for velha in CONVERSAS.glob("*.json"):
@@ -855,8 +870,10 @@ def registrar_conversa(origem: str, sessao: str, dados: dict) -> None:
         except (FileNotFoundError, json.JSONDecodeError):
             antigo = {}
         titulo = titulo_claude(dados.get("transcript_path") or "") if origem == "claude" else ""
+        pid = os.environ.get("CLAUDE_PID", "")  # o processo do Claude Code dono da conversa
         arq.write_text(json.dumps({
             "id": f"{origem}:{sessao}", "origem": origem, "ts": time.time(),
+            "pid": int(pid) if pid.isdigit() else None,
             "pasta": Path(pasta).name if pasta else antigo.get("pasta", ""),
             "titulo": (titulo or antigo.get("titulo", "")).strip()[:80],
         }, ensure_ascii=False), encoding="utf-8")
@@ -874,7 +891,10 @@ def conversas_ativas() -> list[dict]:
             c = json.loads(arq.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if time.time() - c.get("ts", 0) <= JANELA_CONVERSAS:
+        pid = c.get("pid")
+        if pid and not plataforma.processo_vivo(pid):
+            continue  # o processo acabou sem SessionEnd (fechado à força, travou)
+        if time.time() - c.get("ts", 0) <= (JANELA_CONVERSAS if pid else JANELA_SEM_PROCESSO):
             lista.append(c)
     return sorted(lista, key=lambda c: c["ts"], reverse=True)
 
@@ -908,13 +928,17 @@ def hook(origem: str, evento: str) -> None:
     if origem in ("codex", "cursor"):
         print("{}")  # Codex exige JSON no stdout; Cursor aceita
         sys.stdout.flush()
+    sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
+    if evento == "fim" or sessao_sem_ninguem():
+        # fim da sessão (SessionEnd), ou execução sem ninguém olhando: some da lista e nunca fala
+        arquivo_conversa(origem, sessao).unlink(missing_ok=True)
+        return
     if origem == "codex" and not ler_config().get("subagentes_codex", False) \
             and e_subagente_codex(dados.get("transcript_path") or ""):
         return  # resposta de subagente, não a conversa principal
     if origem == "cursor" or evento == "stop":
         guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
     cfg = ler_config()
-    sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
     registrar_conversa(origem, sessao, dados)
     if not cfg["ativo"] or PAUSADO.exists() or (evento == "tool" and not cfg.get("intermediarias", True)):
         return  # desligada ou pausada: nada entra na fila
@@ -1284,7 +1308,7 @@ def main() -> None:
         for i, c in enumerate(ativas, 1):
             print(f"{'🔊' if c['id'] in cfg['conversas_ouvir'] else '  '} {i:>2}  {nome_conversa(c)}")
         if not ativas:
-            print("(nenhuma conversa ativa nas últimas 6 horas)")
+            print("(nenhuma conversa ativa agora)")
     elif cmd == "selecao":
         print(falar_selecao().capitalize() + ".")
     elif cmd == "pausa":

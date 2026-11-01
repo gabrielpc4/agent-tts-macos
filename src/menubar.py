@@ -131,7 +131,7 @@ class App(rumps.App):
         self.menu_conversas.add(filtro)
         self.menu_conversas.add(rumps.separator)
         if not ativas:
-            self.menu_conversas.add(rumps.MenuItem("(nenhuma conversa ativa nas últimas 6 horas)"))
+            self.menu_conversas.add(rumps.MenuItem("(nenhuma conversa ativa agora)"))
         for c in ativas:
             item = rumps.MenuItem(tts.nome_conversa(c), callback=self.alternar_conversa)
             item.conversa = c["id"]

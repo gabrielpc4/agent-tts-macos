@@ -66,7 +66,7 @@ The 🔊 icon (🗣️ while speaking, 🔇 when off):
 | Leitura ligada | Turns automatic reading on/off |
 | Ler subagentes do Codex | Off by default: answers from Codex subagents are ignored (`tts subagentes on`) |
 | Ler passos intermediários | Off = read only final answers, skipping progress notes (`tts intermediarias off`) |
-| Conversas | Lists the conversations that were active in the last 6 hours (Claude Code, Codex, Cursor) with their title and folder. Tick the ones you want to hear: ticking switches on "Ouvir só as escolhidas", and every other conversation goes silent. Untick that option to hear all of them again (`tts conversas`, `tts conversas on\|off`, `tts ouvir 2`) |
+| Conversas | Lists the conversations that are active now (Claude Code, Codex, Cursor) with their title and folder: a conversation leaves the list when its session ends, when its Claude Code process is gone, or after 2 hours without any event (30 minutes when there is no process to check), and comes back with its next event. Headless runs (`claude -p`, Agent SDK) never show up and are never read aloud. Tick the ones you want to hear: ticking switches on "Ouvir só as escolhidas", and every other conversation goes silent. Untick that option to hear all of them again (`tts conversas`, `tts conversas on\|off`, `tts ouvir 2`) |
 | Parar fala / Repetir última / Testar voz | Stop, replay (no API cost), sample |
 | Voz | 30 Gemini voices, female and male |
 | Velocidade | 1.0x–2.0x extra speed on top of the "fast" pace requested from Gemini (pitch preserved) |

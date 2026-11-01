@@ -72,6 +72,7 @@ def main(acao: str) -> None:
     configurar(HOME / ".claude/settings.json", {
         "Stop": claude("stop"),
         "PostToolUse": {"matcher": "*", **claude("tool")},
+        "SessionEnd": claude("fim"),  # tira a conversa da lista do menu
     } if instalar else {})
     # Codex e Cursor só são configurados se já estiverem instalados (a pasta de configuração existe)
     if (HOME / ".codex").exists():
