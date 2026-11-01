@@ -119,6 +119,12 @@ class App(rumps.App):
         if assinatura == self.assinatura_conversas:
             return
         self.assinatura_conversas = assinatura
+        # O rumps guarda todo item criado num dicionário de classe (NSApp._ns_to_py_and_callback) e o
+        # clear() não tira de lá: sem isto, cada vez que o submenu era refeito os itens antigos ficavam
+        # na memória para sempre (1,3 milhão de NSMenuItem e 2 GB depois de 29 horas).
+        registro = rumps.rumps.NSApp._ns_to_py_and_callback
+        for item in self.menu_conversas.values():
+            registro.pop(getattr(item, "_menuitem", None), None)
         self.menu_conversas.clear()
         filtro = rumps.MenuItem("Ouvir só as escolhidas", callback=self.alternar_filtro)
         filtro.state = int(so)
