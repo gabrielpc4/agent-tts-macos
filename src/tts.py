@@ -86,10 +86,14 @@ VOZES_GEMINI = {
 }
 
 ESTILO = (
-    "Fale em português do Brasil num ritmo ágil e um pouco mais rápido que o normal, "
-    "tom natural e direto, como um colega explicando o que acabou de fazer. "
+    "Fale em português do Brasil com a voz feminina de sempre, num tom nunca grave, "
+    "sem nunca começar grave nem masculina. "
+    "Ritmo ágil e um pouco mais rápido que o normal, "
+    "tom natural e direto, como uma colega explicando o que acabou de fazer. "
     "Pronuncie termos técnicos, nomes de ferramentas e palavras em inglês com pronúncia "
-    "americana nativa, sem aportuguesar."
+    "americana nativa, sem aportuguesar. "
+    "Se o texto inteiro estiver em inglês, leia em inglês americano, exatamente como está escrito, "
+    "sem traduzir para o português e sem sotaque brasileiro."
 )
 
 FRASE_TESTE = (
