@@ -116,7 +116,11 @@ def ler_config() -> dict:
 
 
 def salvar_config(cfg: dict) -> None:
-    CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # grava ao lado e troca de uma vez: quem lê no meio (o menu a cada 1 s, os hooks) nunca vê o arquivo
+    # vazio, que virava o PADRAO (leitura ligada, todas as conversas) por um instante
+    temporario = CONFIG.with_name(f".config.{os.getpid()}.tmp")
+    temporario.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temporario, CONFIG)
 
 
 def log(msg: str) -> None:
@@ -865,6 +869,8 @@ def conversas_ativas() -> list[dict]:
     lista = []
     for arq in CONVERSAS.glob("*.json"):
         try:
+            if time.time() - arq.stat().st_mtime > JANELA_CONVERSAS:
+                continue  # o "ts" é gravado junto com o arquivo: velho pela data já está fora (o menu lê a cada 1 s)
             c = json.loads(arq.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
