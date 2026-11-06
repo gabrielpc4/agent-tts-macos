@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
-"""tts — lê em voz alta as respostas do Claude Code, Codex e Cursor.
+"""tts — reads Claude Code, Codex and Cursor answers aloud.
 
-Comandos:
-  tts                      mostra o status
-  tts on | off             liga / desliga a leitura
-  tts voz [Nome]           mostra ou troca a voz do Gemini (ex.: tts voz Kore)
-  tts vozes                lista as vozes disponíveis
-  tts velocidade [x]       mostra ou define a aceleração extra (1.0 a 2.0; 1.0 = "rápida" base)
-  tts mais | menos         +0.1 / -0.1 na velocidade
-  tts intermediarias on|off   lê ou pula os passos no meio do trabalho
-  tts subagentes on|off    lê ou ignora as respostas dos subagentes do Codex
-  tts conversas [on|off]   lista as conversas ativas; on = só as escolhidas falam, off = todas
-  tts ouvir <n|todas|nenhuma>  escolhe (ou tira) uma conversa da lista, pelo número de "tts conversas"
-  tts selecao              lê o texto selecionado no app em foco (atalho global: ⌥Esc)
-  tts pausa                pausa ou continua a fala de onde parou (atalho global: ⌥P)
-  tts parar                interrompe a fala atual
-  tts agora                lê agora a última resposta final (Claude Code, Codex ou Cursor)
-  tts repetir              repete a última fala (já com a velocidade atual, sem chamar a API)
-  tts testar               fala uma frase de teste
-  tts dizer "texto"        fala um texto qualquer
-  tts log                  mostra as últimas linhas do log
-  tts chave gemini [arquivo]  guarda no cofre do sistema a chave copiada, ou lida de um arquivo (apagado depois)
-  tts diagnostico          confere ffmpeg, áudio, chave, hooks e dependências
-  tts autoteste            confere integridade, sobreposição e silêncio entre falas
+Commands:
+  tts                         show the status
+  tts on | off                turn reading on / off
+  tts language [code]         show or change the voice language (e.g. tts language en-US)
+  tts languages               list the voice languages
+  tts voice [Name]            show or change the Gemini voice (e.g. tts voice Kore)
+  tts voices                  list the available voices
+  tts speed [x]               show or set the extra speed-up (1.0 to 2.0; 1.0 = the base "fast" pace)
+  tts faster | slower         +0.1 / -0.1 on the speed
+  tts progress on|off         read or skip the progress notes in the middle of the work
+  tts subagents on|off        read or ignore the answers of Codex subagents
+  tts conversations [on|off]  list the active conversations; on = only the chosen ones speak, off = all of them
+  tts listen <n|all|none>     choose (or unchoose) a conversation from the list, by its number in "tts conversations"
+  tts selection               read the text selected in the frontmost app (global shortcut: ⌥Esc)
+  tts pause                   pause or resume speech where it stopped (global shortcut: ⌥P)
+  tts stop                    stop the current speech
+  tts now                     read the latest final answer now (Claude Code, Codex or Cursor)
+  tts repeat                  repeat the last speech (at the current speed, without calling the API)
+  tts test                    speak a test sentence
+  tts say "text"              speak any text
+  tts log                     show the last lines of the log
+  tts key gemini [file]       store the copied key in the system vault, or read it from a file (deleted afterwards)
+  tts doctor                  check ffmpeg, audio, key, hooks and dependencies
+  tts selftest                check integrity, overlap and silence between utterances
 
-Uso interno (hooks):  tts hook claude|codex stop|tool  ·  tts hook cursor   (JSON do hook no stdin)
+Internal use (hooks):  tts hook claude|codex stop|tool|end  ·  tts hook cursor   (hook JSON on stdin)
 """
 import base64
 import glob
@@ -36,7 +38,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -45,82 +46,158 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
-import plataforma
-from plataforma import MAC, WINDOWS, TravaArquivo, sem_janela
+import platform_support
+from platform_support import WINDOWS, FileLock, no_window
 
-plataforma.preparar_console()
+platform_support.prepare_console()
 
-BASE = Path.home() / ".tts-agentes"
+BASE = Path.home() / ".agent-tts"
 CONFIG = BASE / "config.json"
 PIDFILE = BASE / "worker.pid"
 LOCK = BASE / "worker.lock"
-FILA = BASE / "fila"
-ESTADO = BASE / "estado"
+QUEUE = BASE / "queue"
+STATE = BASE / "state"
 LOG = BASE / "tts.log"
-ULTIMO = BASE / "ultimo"  # ultimo.wav / ultimo.mp3 / ultimo.aiff
-PYTHON = plataforma.python_do_venv(BASE)
+LAST = BASE / "last"  # last.wav / last.mp3
+PYTHON = platform_support.venv_python(BASE)
 
-PADRAO = {
-    "ativo": True,
-    "voz": "Kore",
-    "modelo": "gemini-3.8-flash-tts",  # ou gemini-3.8-flash-lite-tts (mais barato)
-    "velocidade": 1.0,       # aceleração extra (B) aplicada localmente
-    "subagentes_codex": False,   # True: lê também o que os subagentes do Codex respondem
-    "intermediarias": True,      # False: lê só a resposta final, pulando os passos no meio do trabalho
-    "so_conversas_escolhidas": False,  # True: só as conversas de "conversas_ouvir" falam
-    "conversas_ouvir": [],             # ids das conversas escolhidas para ouvir
-    "max_caracteres": 0,         # 0 = lê a resposta inteira (cada 3 mil caracteres viram um pedido)
-    "silencio_inicial_ms": 600,  # o alto-falante leva um instante para acordar e engolia a 1ª palavra
-    "voz_reserva": "pt-BR-ThalitaMultilingualNeural",
-    "voz_offline": plataforma.voz_offline_padrao(),
+DEFAULTS = {
+    "enabled": True,
+    "language": "",              # "" = the system language (English when it isn't one of LANGUAGES)
+    "voice": "Kore",
+    "model": "gemini-3.8-flash-tts",  # or gemini-3.8-flash-lite-tts (cheaper)
+    "speed": 1.0,                # extra speed-up applied locally
+    "codex_subagents": False,    # True: also read what Codex subagents answer
+    "progress_notes": True,      # False: read only the final answer, skipping the notes in the middle of the work
+    "only_chosen_conversations": False,  # True: only the conversations in "chosen_conversations" speak
+    "chosen_conversations": [],
+    "max_characters": 0,         # 0 = read the whole answer (every 3 thousand characters is one request)
+    "lead_silence_ms": 600,      # the speaker takes a moment to wake up and swallowed the first word
+    "style": "",                 # "" = the style prompt of the language
+    "fallback_voice": "",        # "" = the Microsoft voice of the language
+    "offline_voice": "",         # "" = the system voice of the language
 }
 
-VOZES_GEMINI = {
-    "Kore": "feminina, firme", "Aoede": "feminina, leve", "Leda": "feminina, jovem",
-    "Callirrhoe": "feminina, tranquila", "Autonoe": "feminina, clara", "Despina": "feminina, suave",
-    "Erinome": "feminina, clara", "Laomedeia": "feminina, animada", "Achernar": "feminina, suave",
-    "Gacrux": "feminina, madura", "Pulcherrima": "feminina, direta", "Vindemiatrix": "feminina, gentil",
-    "Sulafat": "feminina, calorosa", "Zephyr": "feminina, brilhante",
-    "Puck": "masculina, animada", "Charon": "masculina, informativa", "Fenrir": "masculina, empolgada",
-    "Orus": "masculina, firme", "Enceladus": "masculina, sussurrada", "Iapetus": "masculina, clara",
-    "Umbriel": "masculina, tranquila", "Algieba": "masculina, suave", "Algenib": "masculina, rouca",
-    "Rasalgethi": "masculina, informativa", "Alnilam": "masculina, firme", "Schedar": "masculina, uniforme",
-    "Achird": "masculina, amigável", "Zubenelgenubi": "masculina, casual", "Sadachbia": "masculina, viva",
-    "Sadaltager": "masculina, conhecedora",
+# Config written before the English rename: old key -> new key. Values equal to the old pt-BR defaults are dropped
+# so the fallback voices follow the selected language.
+LEGACY_CONFIG_KEYS = {
+    "ativo": "enabled", "voz": "voice", "modelo": "model", "velocidade": "speed",
+    "subagentes_codex": "codex_subagents", "intermediarias": "progress_notes",
+    "so_conversas_escolhidas": "only_chosen_conversations", "conversas_ouvir": "chosen_conversations",
+    "max_caracteres": "max_characters", "silencio_inicial_ms": "lead_silence_ms", "estilo": "style",
+    "voz_reserva": "fallback_voice", "voz_offline": "offline_voice",
+    "atalho_pausa": "pause_shortcut", "atalho_selecao": "selection_shortcut",
+}
+LEGACY_DEFAULT_VALUES = {"fallback_voice": {"pt-BR-ThalitaMultilingualNeural"},
+                         "offline_voice": {"Luciana", "Microsoft Maria Desktop"}}
+
+GEMINI_VOICES = {
+    "Kore": ("female", "firm"), "Aoede": ("female", "breezy"), "Leda": ("female", "youthful"),
+    "Callirrhoe": ("female", "easy-going"), "Autonoe": ("female", "bright"), "Despina": ("female", "smooth"),
+    "Erinome": ("female", "clear"), "Laomedeia": ("female", "upbeat"), "Achernar": ("female", "soft"),
+    "Gacrux": ("female", "mature"), "Pulcherrima": ("female", "forward"), "Vindemiatrix": ("female", "gentle"),
+    "Sulafat": ("female", "warm"), "Zephyr": ("female", "bright"),
+    "Puck": ("male", "upbeat"), "Charon": ("male", "informative"), "Fenrir": ("male", "excitable"),
+    "Orus": ("male", "firm"), "Enceladus": ("male", "breathy"), "Iapetus": ("male", "clear"),
+    "Umbriel": ("male", "easy-going"), "Algieba": ("male", "smooth"), "Algenib": ("male", "gravelly"),
+    "Rasalgethi": ("male", "informative"), "Alnilam": ("male", "firm"), "Schedar": ("male", "even"),
+    "Achird": ("male", "friendly"), "Zubenelgenubi": ("male", "casual"), "Sadachbia": ("male", "lively"),
+    "Sadaltager": ("male", "knowledgeable"),
 }
 
-ESTILO = (
-    "Fale em português do Brasil com a voz feminina de sempre, num tom nunca grave, "
-    "sem nunca começar grave nem masculina. "
-    "Ritmo ágil e um pouco mais rápido que o normal, "
-    "tom natural e direto, como uma colega explicando o que acabou de fazer. "
-    "Pronuncie termos técnicos, nomes de ferramentas e palavras em inglês com pronúncia "
-    "americana nativa, sem aportuguesar. "
-    "Se o texto inteiro estiver em inglês, leia em inglês americano, exatamente como está escrito, "
-    "sem traduzir para o português e sem sotaque brasileiro."
-)
-
-FRASE_TESTE = (
-    "Pronto! Fiz o deploy da branch e o build passou. O pull request já está "
-    "aberto no GitHub, esperando review antes do merge."
-)
+# Each language: its own name (shown in the menu), its English name (used in the style prompt), the Microsoft
+# fallback voice, the offline system voices and a test sentence written in that language.
+LANGUAGES = {
+    "en-US": {"name": "English (US)", "english": "American English",
+              "fallback_voice": "en-US-AvaMultilingualNeural", "mac_voice": "Samantha",
+              "windows_voice": "Microsoft Zira Desktop",
+              "test": "Done! I deployed the branch and the build passed. The pull request is open on GitHub, "
+                      "waiting for review before the merge."},
+    "en-GB": {"name": "English (UK)", "english": "British English",
+              "fallback_voice": "en-GB-SoniaNeural", "mac_voice": "Daniel",
+              "windows_voice": "Microsoft Hazel Desktop",
+              "test": "Done! I deployed the branch and the build passed. The pull request is open on GitHub, "
+                      "waiting for review before the merge."},
+    "pt-BR": {"name": "Português (Brasil)", "english": "Brazilian Portuguese",
+              "fallback_voice": "pt-BR-ThalitaMultilingualNeural", "mac_voice": "Luciana",
+              "windows_voice": "Microsoft Maria Desktop",
+              "test": "Pronto! Fiz o deploy da branch e o build passou. O pull request já está aberto no GitHub, "
+                      "esperando review antes do merge."},
+    "pt-PT": {"name": "Português (Portugal)", "english": "European Portuguese",
+              "fallback_voice": "pt-PT-RaquelNeural", "mac_voice": "Joana",
+              "windows_voice": "Microsoft Helia Desktop",
+              "test": "Pronto! Fiz o deploy do branch e o build passou. O pull request já está aberto no GitHub, "
+                      "à espera de review antes do merge."},
+    "es-ES": {"name": "Español (España)", "english": "Castilian Spanish",
+              "fallback_voice": "es-ES-XimenaNeural", "mac_voice": "Mónica",
+              "windows_voice": "Microsoft Helena Desktop",
+              "test": "¡Listo! Hice el deploy de la rama y el build pasó. El pull request ya está abierto en "
+                      "GitHub, esperando review antes del merge."},
+    "es-MX": {"name": "Español (México)", "english": "Mexican Spanish",
+              "fallback_voice": "es-MX-DaliaNeural", "mac_voice": "Paulina",
+              "windows_voice": "Microsoft Sabina Desktop",
+              "test": "¡Listo! Hice el deploy de la rama y el build pasó. El pull request ya está abierto en "
+                      "GitHub, esperando review antes del merge."},
+    "fr-FR": {"name": "Français", "english": "French",
+              "fallback_voice": "fr-FR-VivienneMultilingualNeural", "mac_voice": "Thomas",
+              "windows_voice": "Microsoft Hortense Desktop",
+              "test": "C'est fait ! J'ai fait le deploy de la branche et le build est passé. La pull request est "
+                      "ouverte sur GitHub, en attente de review avant le merge."},
+    "de-DE": {"name": "Deutsch", "english": "German",
+              "fallback_voice": "de-DE-SeraphinaMultilingualNeural", "mac_voice": "Anna",
+              "windows_voice": "Microsoft Hedda Desktop",
+              "test": "Fertig! Ich habe den Branch deployt und der Build ist durchgelaufen. Der Pull Request ist "
+                      "auf GitHub offen und wartet vor dem Merge auf ein Review."},
+    "it-IT": {"name": "Italiano", "english": "Italian",
+              "fallback_voice": "it-IT-ElsaNeural", "mac_voice": "Alice",
+              "windows_voice": "Microsoft Elsa Desktop",
+              "test": "Fatto! Ho fatto il deploy del branch e la build è passata. La pull request è aperta su "
+                      "GitHub, in attesa di review prima del merge."},
+    "ja-JP": {"name": "日本語", "english": "Japanese",
+              "fallback_voice": "ja-JP-NanamiNeural", "mac_voice": "Kyoko",
+              "windows_voice": "Microsoft Haruka Desktop",
+              "test": "完了しました！ブランチをデプロイして、ビルドも通りました。プルリクエストは GitHub で開いていて、"
+                      "マージ前のレビュー待ちです。"},
+    "zh-CN": {"name": "中文（简体）", "english": "Mandarin Chinese",
+              "fallback_voice": "zh-CN-XiaoxiaoNeural", "mac_voice": "Tingting",
+              "windows_voice": "Microsoft Huihui Desktop",
+              "test": "完成了！我已经部署了这个分支，构建也通过了。拉取请求已经在 GitHub 上打开，正在等待合并前的审查。"},
+    "ko-KR": {"name": "한국어", "english": "Korean",
+              "fallback_voice": "ko-KR-SunHiNeural", "mac_voice": "Yuna",
+              "windows_voice": "Microsoft Heami Desktop",
+              "test": "완료했어요! 브랜치를 배포했고 빌드도 통과했어요. 풀 리퀘스트는 GitHub에 열려 있고, "
+                      "머지 전에 리뷰를 기다리고 있어요."},
+}
+DEFAULT_LANGUAGE = "en-US"
 
 
 # ---------------------------------------------------------------- config / log
 
-def ler_config() -> dict:
+def migrate_config(stored: dict) -> dict:
+    migrated = {}
+    for key, value in stored.items():
+        new = LEGACY_CONFIG_KEYS.get(key, key)
+        if value in LEGACY_DEFAULT_VALUES.get(new, ()) and key != new:
+            continue
+        if key == new or new not in stored:
+            migrated[new] = value
+    return migrated
+
+
+def read_config() -> dict:
     try:
-        return {**PADRAO, **json.loads(CONFIG.read_text(encoding="utf-8"))}
+        return {**DEFAULTS, **migrate_config(json.loads(CONFIG.read_text(encoding="utf-8")))}
     except (FileNotFoundError, json.JSONDecodeError):
-        return dict(PADRAO)
+        return dict(DEFAULTS)
 
 
-def salvar_config(cfg: dict) -> None:
-    # grava ao lado e troca de uma vez: quem lê no meio (o menu a cada 1 s, os hooks) nunca vê o arquivo
-    # vazio, que virava o PADRAO (leitura ligada, todas as conversas) por um instante
-    temporario = CONFIG.with_name(f".config.{os.getpid()}.tmp")
-    temporario.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temporario, CONFIG)
+def save_config(cfg: dict) -> None:
+    # written next to it and swapped in one go: a reader in the middle (the menu every 1 s, the hooks) never sees
+    # an empty file, which turned into DEFAULTS (reading on, every conversation) for a moment
+    BASE.mkdir(parents=True, exist_ok=True)
+    temporary = CONFIG.with_name(f".config.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temporary, CONFIG)
 
 
 def log(msg: str) -> None:
@@ -133,1134 +210,1192 @@ def log(msg: str) -> None:
         pass
 
 
-# ---------------------------------------------------------------- limpeza do texto
+# ---------------------------------------------------------------- language
+
+def match_language(tags: list[str]) -> str:
+    """The first preferred language we support: the exact tag, else the same language in another region."""
+    codes = {c.lower(): c for c in LANGUAGES}
+    for tag in tags:
+        tag = tag.replace("_", "-").lower()
+        if tag in codes:
+            return codes[tag]
+        base = tag.split("-")[0]
+        if found := next((c for c in LANGUAGES if c.split("-")[0].lower() == base), None):
+            return found
+    return DEFAULT_LANGUAGE
+
+
+def system_language() -> str:
+    try:
+        return match_language(platform_support.system_languages())
+    except Exception as e:
+        log(f"system language not read: {e}")
+        return DEFAULT_LANGUAGE
+
+
+def current_language(cfg: dict) -> str:
+    chosen = cfg.get("language") or ""
+    return chosen if chosen in LANGUAGES else system_language()
+
+
+def style_prompt(cfg: dict) -> str:
+    if cfg.get("style"):
+        return cfg["style"]
+    language = LANGUAGES[current_language(cfg)]["english"]
+    gender = GEMINI_VOICES.get(cfg["voice"], ("female", ""))[0]
+    common = (f"Keep the same {gender} voice, steady from the very first word, never starting in a deeper or "
+              "different register. Brisk pace, a little faster than normal, with a natural, direct tone, "
+              "like a colleague explaining what they just did.")
+    if language.endswith("English"):
+        return f"Speak in {language}. {common}"
+    return (f"Speak in {language}. {common} Pronounce technical terms, tool names and English words with a native "
+            f"American English pronunciation, without adapting them to {language}. If the whole text is in "
+            "English, read it in American English exactly as written, without translating it and without a "
+            "foreign accent.")
+
+
+def fallback_voice(cfg: dict) -> str:
+    return cfg.get("fallback_voice") or LANGUAGES[current_language(cfg)]["fallback_voice"]
+
+
+def offline_voice(cfg: dict) -> str:
+    language = LANGUAGES[current_language(cfg)]
+    return cfg.get("offline_voice") or language["windows_voice" if WINDOWS else "mac_voice"]
+
+
+def test_sentence(cfg: dict | None = None) -> str:
+    return LANGUAGES[current_language(cfg or read_config())]["test"]
+
+
+# ---------------------------------------------------------------- text cleanup
 
 EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
 
 
-def limpar(texto: str, limite: int = 0) -> str:
-    t = re.sub(r"```.*?(```|$)", " ", texto, flags=re.S)           # blocos de código
+def clean_text(text: str, limit: int = 0) -> str:
+    t = re.sub(r"```.*?(```|$)", " ", text, flags=re.S)             # code blocks
     t = re.sub(r"<(oai-mem-citation|citation_entries|rollout_ids|system-reminder)\b[^>]*>.*?(</\1>|$)",
-               " ", t, flags=re.S)                                   # citações de memória do Codex etc.
-    t = re.sub(r"<[^>\n]+>", " ", t)                                 # tags html/xml
+               " ", t, flags=re.S)                                   # Codex memory citations etc.
+    t = re.sub(r"<[^>\n]+>", " ", t)                                 # html/xml tags
 
     def inline(m):
         c = m.group(1).strip()
         if "/" in c and " " not in c:
-            ultimo = c.rstrip("/").split("/")[-1]
-            if re.search(r"\.\w+(:\d+(-\d+)?)?$", ultimo) or c[0] in "./~":   # caminho -> só o arquivo
-                c = ultimo
+            last = c.rstrip("/").split("/")[-1]
+            if re.search(r"\.\w+(:\d+(-\d+)?)?$", last) or c[0] in "./~":   # path -> just the file
+                c = last
             else:                                                    # feature/login -> feature login
                 c = c.replace("/", " ")
         return c if len(c) <= 40 else " "
     t = re.sub(r"`([^`\n]+)`", inline, t)
 
-    linhas = []
-    for linha in t.splitlines():
-        s = linha.strip()
-        if re.fullmatch(r"\|?[\s:\-|]+\|?", s) and "-" in s:         # separador de tabela
+    lines = []
+    for line in t.splitlines():
+        s = line.strip()
+        if re.fullmatch(r"\|?[\s:\-|]+\|?", s) and "-" in s:         # table separator
             continue
-        if s.startswith("|"):                                        # linha de tabela -> "a, b, c."
+        if s.startswith("|"):                                        # table row -> "a, b, c."
             s = ", ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
-        s = re.sub(r"^#{1,6}\s*", "", s)                             # títulos
-        s = re.sub(r"^([-*+]|\d+[.)])\s+", "", s)                    # marcadores de lista
-        s = re.sub(r"^>\s?", "", s)                                  # citações
-        if s and s[-1] not in ".!?:;,":
+        s = re.sub(r"^#{1,6}\s*", "", s)                             # headings
+        s = re.sub(r"^([-*+]|\d+[.)])\s+", "", s)                    # list markers
+        s = re.sub(r"^>\s?", "", s)                                  # quotes
+        if s and s[-1] not in ".!?:;,。！？":
             s += "."
-        linhas.append(s)
-    t = " ".join(linhas)
+        lines.append(s)
+    t = " ".join(lines)
 
-    t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)                 # [texto](url) -> texto
-    t = re.sub(r"https?://\S+", " ", t)                              # URLs soltas
-    t = re.sub(r"(\.\w{1,5}):\d+(-\d+)?\b", r"\1", t)                  # arquivo.ts:42 -> arquivo.ts
-    t = re.sub(r"(\*\*|__|\*|~~)", "", t)                            # negrito/itálico
+    t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)                 # [text](url) -> text
+    t = re.sub(r"https?://\S+", " ", t)                              # bare URLs
+    t = re.sub(r"(\.\w{1,5}):\d+(-\d+)?\b", r"\1", t)                  # file.ts:42 -> file.ts
+    t = re.sub(r"(\*\*|__|\*|~~)", "", t)                            # bold/italic
     t = EMOJI.sub("", t)
     t = t.replace("→", ",").replace("·", ",").replace("—", ",")
     t = re.sub(r"\s+([.,!?;:])", r"\1", t)
     t = re.sub(r"([.,!?;:])\1+", r"\1", t)
     t = re.sub(r"\s+", " ", t).strip(" .,")
 
-    if limite and len(t) > limite:
-        corte = max(t.rfind(p, 0, limite) for p in ".!?")
-        t = t[: corte + 1 if corte > limite // 2 else limite]
+    if limit and len(t) > limit:
+        cut = max(t.rfind(p, 0, limit) for p in ".!?")
+        t = t[: cut + 1 if cut > limit // 2 else limit]
     return t
 
 
-# ---------------------------------------------------------------- motores (streaming)
+# ---------------------------------------------------------------- engines (streaming)
 
-binario = plataforma.binario
+find_binary = platform_support.find_binary
+
+FFMPEG = find_binary("ffmpeg")
+SEGMENT_MAX = 3000  # characters per Gemini request (the quota is per request, so fewer requests is better)
 
 
-FFMPEG = binario("ffmpeg")
-SEGMENTO_MAX = 3000  # caracteres por pedido ao Gemini (a cota é por pedido, então menos pedidos é melhor)
-
-
-def chave(servico: str) -> str | None:
-    """Lê a chave do cofre do sistema (macOS: chaveiro de login; Windows: Gerenciador de Credenciais)."""
-    valor = plataforma.ler_chave(servico)
-    aviso = BASE / f"sem-{servico}"
-    if not valor:
-        if not aviso.exists():
-            log(f"chave {servico} não encontrada: usando a voz reserva")
-        aviso.touch()
+def key(service: str) -> str | None:
+    """Reads the key from the system vault (macOS: login keychain; Windows: Credential Manager)."""
+    value = platform_support.read_key(service)
+    notice = BASE / f"no-key-{service}"
+    if not value:
+        if not notice.exists():
+            log(f"key {service} not found: using the fallback voice")
+        notice.touch()
         return None
-    aviso.unlink(missing_ok=True)
-    return valor
+    notice.unlink(missing_ok=True)
+    return value
 
 
-def gemini_stream(texto: str, voz: str, modelo: str, estilo: str = ESTILO):
-    """Entrega o áudio em pedaços (PCM 24 kHz, mono, 16 bits) conforme o Gemini vai gerando."""
-    key = chave("tts-gemini")
-    if not key:
-        raise RuntimeError("sem chave tts-gemini no Keychain")
+def gemini_stream(text: str, voice: str, model: str, style: str):
+    """Yields the audio in chunks (PCM 24 kHz, mono, 16 bits) as Gemini generates it."""
+    api_key = key("tts-gemini")
+    if not api_key:
+        raise RuntimeError("no tts-gemini key in the keychain")
     body = {
-        "model": modelo,
+        "model": model,
         "input": [{"type": "user_input", "content": [{
-            "type": "text", "text": texto,
-            "annotations": [{"type": "speech_metadata", "style": estilo}],
+            "type": "text", "text": text,
+            "annotations": [{"type": "speech_metadata", "style": style}],
         }]}],
         "response_format": {"type": "audio"},
-        "generation_config": {"speech_config": [{"voice": voz}]},
+        "generation_config": {"speech_config": [{"voice": voice}]},
         "stream": True,
     }
     req = urllib.request.Request(
         "https://generativelanguage.googleapis.com/v1beta/interactions",
         data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key})
     try:
-        resposta = urllib.request.urlopen(req, timeout=10)
+        response = urllib.request.urlopen(req, timeout=10)
     except urllib.error.HTTPError as e:
-        erro = f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
+        error = f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
         if e.code == 429:
-            pausar_gemini(erro, modelo)
-        raise RuntimeError(erro)
-    with resposta:
-        for bruto in resposta:
-            linha = bruto.decode(errors="replace").strip()
-            if not linha.startswith("data:"):
+            pause_gemini(error, model)
+        raise RuntimeError(error)
+    with response:
+        for raw in response:
+            line = raw.decode(errors="replace").strip()
+            if not line.startswith("data:"):
                 continue
-            payload = linha[5:].strip()
+            payload = line[5:].strip()
             if not payload or payload == "[DONE]":
                 continue
-            evento = json.loads(payload)
-            if evento.get("error") or evento.get("event_type") == "error":
-                raise RuntimeError(f"erro no stream: {str(evento)[:200]}")
-            delta = evento.get("delta") or {}
+            event = json.loads(payload)
+            if event.get("error") or event.get("event_type") == "error":
+                raise RuntimeError(f"stream error: {str(event)[:200]}")
+            delta = event.get("delta") or {}
             if delta.get("type") == "audio":
                 yield base64.b64decode(delta["data"])
 
 
-MODELOS_GEMINI = ("gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts")  # cotas diárias separadas
+GEMINI_MODELS = ("gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts")  # separate daily quotas
 
 
-def arquivo_pausa(modelo: str) -> Path:
-    return BASE / f"pausa-{modelo}"
+def pause_file(model: str) -> Path:
+    return BASE / f"pause-{model}"
 
 
-def pausar_gemini(erro: str, modelo: str) -> None:
-    """Respeita o 'retry in 10h22m21s' do Google; cada modelo tem sua própria cota."""
-    m = re.search(r"retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", erro)
-    segundos = 0.0
+def pause_gemini(error: str, model: str) -> None:
+    """Honors Google's 'retry in 10h22m21s'; each model has its own quota."""
+    m = re.search(r"retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", error)
+    seconds = 0.0
     if m:
-        for valor, unidade in re.findall(r"([\d.]+)([hms])", m.group(1)):
-            segundos += float(valor) * {"h": 3600, "m": 60, "s": 1}[unidade]
-    segundos = segundos + 5 if segundos else 120
-    arquivo_pausa(modelo).write_text(str(time.time() + segundos), encoding="utf-8")
-    log(f"{modelo} pausado por {segundos / 60:.0f} min (limite de uso)")
+        for value, unit in re.findall(r"([\d.]+)([hms])", m.group(1)):
+            seconds += float(value) * {"h": 3600, "m": 60, "s": 1}[unit]
+    seconds = seconds + 5 if seconds else 120
+    pause_file(model).write_text(str(time.time() + seconds), encoding="utf-8")
+    log(f"{model} paused for {seconds / 60:.0f} min (usage limit)")
 
 
-def gemini_pausado(modelo: str | None = None) -> bool:
-    """Sem modelo: True só se todos os modelos estiverem pausados."""
-    def pausado(m: str) -> bool:
+def gemini_paused(model: str | None = None) -> bool:
+    """Without a model: True only if every model is paused."""
+    def paused(m: str) -> bool:
         try:
-            return time.time() < float(arquivo_pausa(m).read_text(encoding="utf-8"))
+            return time.time() < float(pause_file(m).read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return False
-    return pausado(modelo) if modelo else all(pausado(m) for m in MODELOS_GEMINI)
+    return paused(model) if model else all(paused(m) for m in GEMINI_MODELS)
 
 
-def pausa_ate(modelo: str) -> float | None:
+def paused_until(model: str) -> float | None:
     try:
-        ate = float(arquivo_pausa(modelo).read_text(encoding="utf-8"))
-        return ate if ate > time.time() else None
+        until = float(pause_file(model).read_text(encoding="utf-8"))
+        return until if until > time.time() else None
     except (FileNotFoundError, ValueError):
         return None
 
 
-def edge_stream(texto: str, voz: str, entregar) -> None:
-    """Voz reserva da Microsoft (grátis), entregue em pedaços de MP3."""
+def edge_stream(text: str, voice: str, deliver) -> None:
+    """Microsoft fallback voice (free), delivered in MP3 chunks."""
     import asyncio
     import edge_tts
 
-    async def rodar():
-        async for parte in edge_tts.Communicate(texto, voz, rate="+15%").stream():
-            if parte["type"] == "audio":
-                entregar(("mp3", parte["data"]))
-    asyncio.run(rodar())
+    async def run():
+        async for part in edge_tts.Communicate(text, voice, rate="+15%").stream():
+            if part["type"] == "audio":
+                deliver(("mp3", part["data"]))
+    asyncio.run(run())
 
 
-def say_pcm(texto: str, voz: str) -> bytes:
-    """Última reserva, offline: voz do sistema no mesmo formato PCM do Gemini."""
-    return plataforma.voz_offline_pcm(texto, voz)
-
-
-def segmentar(texto: str, maximo: int = SEGMENTO_MAX) -> list[str]:
-    """Divide o texto em partes de até `maximo` caracteres, sempre entre frases."""
-    partes, atual = [], ""
-    for frase in re.split(r"(?<=[.!?])\s+", texto):
-        while len(frase) > maximo:  # frase gigante: corta num espaço
-            corte = frase.rfind(" ", 0, maximo)
-            corte = corte if corte > maximo // 2 else maximo
-            if atual:
-                partes.append(atual)
-                atual = ""
-            partes.append(frase[:corte])
-            frase = frase[corte:].lstrip()
-        if atual and len(atual) + 1 + len(frase) > maximo:
-            partes.append(atual)
-            atual = frase
+def split_segments(text: str, maximum: int = SEGMENT_MAX) -> list[str]:
+    """Splits the text into parts of up to `maximum` characters, always between sentences."""
+    parts, current = [], ""
+    # CJK sentence marks come without a space after them; "." without a space is a file name or a number
+    for sentence in re.split(r"(?<=[.!?])\s+|(?<=[。！？])", text):
+        while len(sentence) > maximum:  # giant sentence: cut at a space
+            cut = sentence.rfind(" ", 0, maximum)
+            cut = cut if cut > maximum // 2 else maximum
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(sentence[:cut])
+            sentence = sentence[cut:].lstrip()
+        if current and len(current) + 1 + len(sentence) > maximum:
+            parts.append(current)
+            current = sentence
         else:
-            atual = f"{atual} {frase}".strip()
-    if atual:
-        partes.append(atual)
-    return partes
+            current = f"{current} {sentence}".strip()
+    if current:
+        parts.append(current)
+    return parts
 
 
-def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
-    """Gera o áudio de cada parte, em ordem, entregando pedaços (formato, bytes).
+def produce(segments: list[str], cfg: dict, deliver) -> str:
+    """Generates the audio of each part, in order, delivering chunks (format, bytes).
 
-    Gemini (até 2 tentativas) → Microsoft → say. Se o Gemini falhar depois de já ter
-    entregado áudio daquela parte, não repete a parte em outra voz."""
-    motores = []
-    tem_chave = bool(chave("tts-gemini"))  # sem chave, cada tentativa no Gemini só atrasava a voz reserva
-    for i, segmento in enumerate(segmentos, 1):
-        motor = None
-        preferido = cfg["modelo"]
-        for modelo in [preferido] + [m for m in MODELOS_GEMINI if m != preferido]:
-            if motor or not tem_chave or gemini_pausado(modelo):
+    Gemini (up to 2 attempts) → Microsoft → system voice. If Gemini fails after it already delivered
+    audio for that part, the part isn't repeated in another voice."""
+    engines = []
+    has_key = bool(key("tts-gemini"))  # without a key every Gemini attempt only delayed the fallback voice
+    style = style_prompt(cfg)
+    for i, segment in enumerate(segments, 1):
+        engine = None
+        preferred = cfg["model"]
+        for model in [preferred] + [m for m in GEMINI_MODELS if m != preferred]:
+            if engine or not has_key or gemini_paused(model):
                 continue
-            for tentativa in (1, 2):
-                recebeu = False
+            for attempt in (1, 2):
+                received = False
                 try:
-                    for pedaco in gemini_stream(segmento, cfg["voz"], modelo, cfg.get("estilo") or ESTILO):
-                        recebeu = True
-                        entregar(("pcm", pedaco))
-                    motor = "gemini" if modelo == preferido else f"gemini ({modelo})"
+                    for chunk in gemini_stream(segment, cfg["voice"], model, style):
+                        received = True
+                        deliver(("pcm", chunk))
+                    engine = "gemini" if model == preferred else f"gemini ({model})"
                     break
                 except Exception as e:
-                    log(f"falha {modelo} parte={i} tentativa={tentativa}: {str(e)[:200]}")
-                    if recebeu:
-                        motor = "gemini-parcial"
+                    log(f"failed {model} part={i} attempt={attempt}: {str(e)[:200]}")
+                    if received:
+                        engine = "gemini-partial"
                         break
-                    if gemini_pausado(modelo) or re.match(r"HTTP 4\d\d", str(e)):
-                        break  # erro do pedido (ou limite): repetir não adianta
+                    if gemini_paused(model) or re.match(r"HTTP 4\d\d", str(e)):
+                        break  # request error (or limit): retrying doesn't help
                     time.sleep(0.8)
-        if motor is None:
+        if engine is None:
             try:
-                edge_stream(segmento, cfg["voz_reserva"], entregar)
-                motor = "edge"
+                edge_stream(segment, fallback_voice(cfg), deliver)
+                engine = "edge"
             except Exception as e:
-                log(f"falha edge parte={i}: {str(e)[:200]}")
+                log(f"failed edge part={i}: {str(e)[:200]}")
                 try:
-                    entregar(("pcm", say_pcm(segmento, cfg["voz_offline"])))
-                    motor = "say"
+                    deliver(("pcm", platform_support.offline_voice_pcm(segment, offline_voice(cfg))))
+                    engine = "offline"
                 except Exception as e2:
-                    log(f"falha say parte={i}: {e2}")
-                    motor = "nenhum"
-        motores.append(motor)
-    return ",".join(motores)
+                    log(f"failed offline voice part={i}: {e2}")
+                    engine = "none"
+        engines.append(engine)
+    return ",".join(engines)
 
 
-# ---------------------------------------------------------------- fila e reprodução
+# ---------------------------------------------------------------- queue and playback
 
 class Item:
-    """Uma fala. O áudio é gerado numa thread e consumido pelo player conforme chega."""
+    """One utterance. The audio is generated in a thread and consumed by the player as it arrives."""
 
-    def __init__(self, texto: str, enfileirado_em: float):
-        cfg = ler_config()
-        self.limpo = limpar(texto, cfg.get("max_caracteres", 0))
-        self.enfileirado_em = enfileirado_em
-        self.pedacos: queue.Queue = queue.Queue()
-        self.motor = "?"
-        if self.limpo:
-            threading.Thread(target=self._produzir, args=(cfg,), daemon=True).start()
+    def __init__(self, text: str, queued_at: float):
+        cfg = read_config()
+        self.clean = clean_text(text, cfg.get("max_characters", 0))
+        self.queued_at = queued_at
+        self.chunks: queue.Queue = queue.Queue()
+        self.engine = "?"
+        if self.clean:
+            threading.Thread(target=self._produce, args=(cfg,), daemon=True).start()
 
-    def _produzir(self, cfg: dict) -> None:
+    def _produce(self, cfg: dict) -> None:
         try:
-            self.motor = produzir(segmentar(self.limpo), cfg, self.pedacos.put)
+            self.engine = produce(split_segments(self.clean), cfg, self.chunks.put)
         except Exception as e:
-            log(f"erro na produção: {e}")
+            log(f"production error: {e}")
         finally:
-            self.pedacos.put(None)
+            self.chunks.put(None)
 
 
-RESERVA_INICIAL = 24000          # bytes de PCM (0,5 s) juntados antes de começar uma fala com o buffer vazio
-TAXA, BYTES_POR_SEG = 24000, 48000
-PAUSADO = BASE / "pausado"
+INITIAL_BUFFER = 24000           # PCM bytes (0.5 s) gathered before starting an utterance with an empty buffer
+RATE, BYTES_PER_SEC = 24000, 48000
+PAUSED = BASE / "paused"
 
 
-class Saida:
-    """Saída de áudio única do worker (PCM 24 kHz, mono). Fica aberta entre as falas, então o
-    alto-falante só precisa acordar uma vez. Pausada, entrega silêncio sem avançar no áudio."""
+class Output:
+    """The worker's single audio output (PCM 24 kHz, mono). It stays open between utterances, so the
+    speaker only needs to wake up once. While paused it plays silence without advancing the audio."""
 
     def __init__(self):
-        self.buffer, self.trava = bytearray(), threading.Lock()
-        self.vazio = threading.Event()
-        self.vazio.set()
-        self.pausado = False
-        self.arquivo = None
+        self.buffer, self.mutex = bytearray(), threading.Lock()
+        self.empty = threading.Event()
+        self.empty.set()
+        self.paused = False
+        self.file = None
         self.stream = None
-        threading.Thread(target=self._vigiar_pausa, daemon=True).start()
+        threading.Thread(target=self._watch_pause, daemon=True).start()
         if not os.environ.get("TTS_SINK_DIR"):
             import sounddevice as sd
-            self.stream = sd.RawOutputStream(samplerate=TAXA, channels=1, dtype="int16",
+            self.stream = sd.RawOutputStream(samplerate=RATE, channels=1, dtype="int16",
                                              blocksize=1200, callback=self._callback)
             self.stream.start()
-            atraso = int(ler_config().get("silencio_inicial_ms", 600))
-            self.escrever(bytes(atraso * BYTES_POR_SEG // 1000 // 2 * 2))  # acorda o alto-falante
+            lead = int(read_config().get("lead_silence_ms", 600))
+            self.write(bytes(lead * BYTES_PER_SEC // 1000 // 2 * 2))  # wakes the speaker up
 
-    def _vigiar_pausa(self) -> None:
+    def _watch_pause(self) -> None:
         while True:
-            self.pausado = PAUSADO.exists()
+            self.paused = PAUSED.exists()
             time.sleep(0.05)
 
-    def _callback(self, saida, frames, tempo, status) -> None:
+    def _callback(self, out, frames, time_info, status) -> None:
         n = frames * 2
-        with self.trava:
-            if self.pausado:
-                pedaco = b""
+        with self.mutex:
+            if self.paused:
+                chunk = b""
             else:
-                pedaco = bytes(self.buffer[:n])
+                chunk = bytes(self.buffer[:n])
                 del self.buffer[:n]
             if not self.buffer:
-                self.vazio.set()
-        saida[:len(pedaco)] = pedaco
-        saida[len(pedaco):] = bytes(n - len(pedaco))
+                self.empty.set()
+        out[:len(chunk)] = chunk
+        out[len(chunk):] = bytes(n - len(chunk))
 
-    def nova_fala(self) -> None:
-        """Nos testes, cada fala vira um arquivo .wav separado."""
-        if destino := os.environ.get("TTS_SINK_DIR"):
-            self.fechar_arquivo()
-            self.arquivo = wave.open(str(Path(destino) / f"{time.time_ns()}.wav"), "wb")
-            self.arquivo.setnchannels(1)
-            self.arquivo.setsampwidth(2)
-            self.arquivo.setframerate(TAXA)
+    def new_utterance(self) -> None:
+        """In the tests, each utterance becomes a separate .wav file."""
+        if target := os.environ.get("TTS_SINK_DIR"):
+            self.close_file()
+            self.file = wave.open(str(Path(target) / f"{time.time_ns()}.wav"), "wb")
+            self.file.setnchannels(1)
+            self.file.setsampwidth(2)
+            self.file.setframerate(RATE)
 
-    def escrever(self, dados: bytes) -> None:
-        if self.arquivo:
-            self.arquivo.writeframes(dados)
+    def write(self, data: bytes) -> None:
+        if self.file:
+            self.file.writeframes(data)
             return
-        with self.trava:
-            self.buffer += dados
+        with self.mutex:
+            self.buffer += data
             if self.buffer:
-                self.vazio.clear()
+                self.empty.clear()
 
-    def vazia(self) -> bool:
-        return self.arquivo is not None or self.vazio.is_set()
+    def is_empty(self) -> bool:
+        return self.file is not None or self.empty.is_set()
 
-    def esperar_esvaziar(self) -> None:
+    def wait_until_empty(self) -> None:
         if self.stream:
-            self.vazio.wait()
-            time.sleep(self.stream.latency + 0.05)  # o que já foi entregue ao alto-falante
+            self.empty.wait()
+            time.sleep(self.stream.latency + 0.05)  # what was already handed to the speaker
 
-    def fechar_arquivo(self) -> None:
-        if self.arquivo:
-            self.arquivo.close()
-            self.arquivo = None
+    def close_file(self) -> None:
+        if self.file:
+            self.file.close()
+            self.file = None
 
-    def fechar(self) -> None:
-        self.esperar_esvaziar()
-        self.fechar_arquivo()
+    def close(self) -> None:
+        self.wait_until_empty()
+        self.close_file()
         if self.stream:
             self.stream.stop()
             self.stream.close()
 
 
-class Conversor:
-    """Passa o áudio pelo ffmpeg quando precisa (MP3 da voz reserva, arquivo, velocidade extra)
-    e entrega PCM pronto para a Saida."""
+class Converter:
+    """Runs the audio through ffmpeg when needed (MP3 from the fallback voice, a file, extra speed)
+    and hands ready PCM to the Output."""
 
-    def __init__(self, formato: str, velocidade: float, saida: Saida, arquivo: Path | None = None):
-        entrada = (["-i", str(arquivo)] if arquivo else
-                   ["-f", "s16le", "-sample_rate", str(TAXA), "-ch_layout", "mono", "-i", "pipe:0"]
-                   if formato == "pcm" else ["-f", "mp3", "-i", "pipe:0"])
-        filtro = ["-af", f"atempo={velocidade:.2f}"] if abs(velocidade - 1.0) > 0.01 else []
-        self.formato = formato
-        self.proc = subprocess.Popen([FFMPEG, "-loglevel", "quiet", *entrada, *filtro,
-                                      "-f", "s16le", "-ar", str(TAXA), "-ac", "1", "pipe:1"],
-                                     stdin=subprocess.DEVNULL if arquivo else subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **sem_janela())
-        self.leitor = threading.Thread(target=self._ler, args=(saida,), daemon=True)
-        self.leitor.start()
+    def __init__(self, fmt: str, speed: float, output: Output, file: Path | None = None):
+        source = (["-i", str(file)] if file else
+                  ["-f", "s16le", "-sample_rate", str(RATE), "-ch_layout", "mono", "-i", "pipe:0"]
+                  if fmt == "pcm" else ["-f", "mp3", "-i", "pipe:0"])
+        audio_filter = ["-af", f"atempo={speed:.2f}"] if abs(speed - 1.0) > 0.01 else []
+        self.format = fmt
+        self.proc = subprocess.Popen([FFMPEG, "-loglevel", "quiet", *source, *audio_filter,
+                                      "-f", "s16le", "-ar", str(RATE), "-ac", "1", "pipe:1"],
+                                     stdin=subprocess.DEVNULL if file else subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **no_window())
+        self.reader = threading.Thread(target=self._read, args=(output,), daemon=True)
+        self.reader.start()
 
-    def _ler(self, saida: Saida) -> None:
-        while dados := self.proc.stdout.read(4800):
-            saida.escrever(dados)
+    def _read(self, output: Output) -> None:
+        while data := self.proc.stdout.read(4800):
+            output.write(data)
 
-    def escrever(self, dados: bytes) -> None:
+    def write(self, data: bytes) -> None:
         try:
-            self.proc.stdin.write(dados)
+            self.proc.stdin.write(data)
         except BrokenPipeError:
-            log("conversor fechou antes do fim do áudio")
+            log("converter closed before the end of the audio")
 
-    def fechar(self) -> None:
+    def close(self) -> None:
         if self.proc.stdin:
             try:
                 self.proc.stdin.close()
             except BrokenPipeError:
                 pass
-        self.leitor.join()
+        self.reader.join()
         self.proc.wait()
 
 
-def salvar_ultimo(gravado: dict) -> None:
-    """Guarda o áudio da última fala para 'Repetir última' e para testar velocidades."""
-    if not (gravado["pcm"] or gravado["mp3"]):
+def save_last(recorded: dict) -> None:
+    """Keeps the audio of the last utterance for 'Repeat last' and for trying speeds."""
+    if not (recorded["pcm"] or recorded["mp3"]):
         return
-    for antigo in BASE.glob("ultimo.*"):
-        antigo.unlink(missing_ok=True)
-    if gravado["pcm"]:
-        with wave.open(str(ULTIMO.with_suffix(".wav")), "wb") as w:
+    for old in BASE.glob("last.*"):
+        old.unlink(missing_ok=True)
+    if recorded["pcm"]:
+        with wave.open(str(LAST.with_suffix(".wav")), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
-            w.setframerate(TAXA)
-            w.writeframes(bytes(gravado["pcm"]))
+            w.setframerate(RATE)
+            w.writeframes(bytes(recorded["pcm"]))
     else:
-        ULTIMO.with_suffix(".mp3").write_bytes(bytes(gravado["mp3"]))
+        LAST.with_suffix(".mp3").write_bytes(bytes(recorded["mp3"]))
 
 
-def tocar_item(item: Item, saida: Saida) -> None:
-    """Entrega uma fala à saída conforme o áudio chega do gerador."""
-    velocidade = ler_config()["velocidade"]
-    direto = abs(velocidade - 1.0) <= 0.01
-    conversor, pendente, primeiro = None, bytearray(), None
-    reserva = RESERVA_INICIAL if saida.vazia() else 0  # buffer vazio: junta meio segundo antes
-    gravado = {"pcm": bytearray(), "mp3": bytearray()}
-    saida.nova_fala()
-    while (pedaco := item.pedacos.get()) is not None:
-        formato, dados = pedaco
-        gravado[formato] += dados
-        if primeiro is None:
-            pendente += dados
-            if formato == "pcm" and len(pendente) < reserva:
+def play_item(item: Item, output: Output) -> None:
+    """Hands an utterance to the output as the audio arrives from the generator."""
+    speed = read_config()["speed"]
+    direct = abs(speed - 1.0) <= 0.01
+    converter, pending, first = None, bytearray(), None
+    reserve = INITIAL_BUFFER if output.is_empty() else 0  # empty buffer: gather half a second first
+    recorded = {"pcm": bytearray(), "mp3": bytearray()}
+    output.new_utterance()
+    while (chunk := item.chunks.get()) is not None:
+        fmt, data = chunk
+        recorded[fmt] += data
+        if first is None:
+            pending += data
+            if fmt == "pcm" and len(pending) < reserve:
                 continue
-            primeiro = time.time()
-            log(f"tocando chars={len(item.limpo)} primeiro_audio_em={primeiro - item.enfileirado_em:.1f}s")
-            dados = bytes(pendente)
-        if formato == "pcm" and direto:
-            if conversor:
-                conversor.fechar()
-                conversor = None
-            saida.escrever(dados)
+            first = time.time()
+            log(f"playing chars={len(item.clean)} first_audio_after={first - item.queued_at:.1f}s")
+            data = bytes(pending)
+        if fmt == "pcm" and direct:
+            if converter:
+                converter.close()
+                converter = None
+            output.write(data)
             continue
-        if not conversor or conversor.formato != formato:
-            if conversor:
-                conversor.fechar()
-            conversor = Conversor(formato, velocidade, saida)
-        conversor.escrever(dados)
-    if primeiro is None and pendente:  # fala curta: acabou antes de encher a reserva
-        log(f"tocando chars={len(item.limpo)} primeiro_audio_em={time.time() - item.enfileirado_em:.1f}s")
-        if direto:
-            saida.escrever(bytes(pendente))
+        if not converter or converter.format != fmt:
+            if converter:
+                converter.close()
+            converter = Converter(fmt, speed, output)
+        converter.write(data)
+    if first is None and pending:  # short utterance: it ended before filling the reserve
+        log(f"playing chars={len(item.clean)} first_audio_after={time.time() - item.queued_at:.1f}s")
+        if direct:
+            output.write(bytes(pending))
         else:
-            conversor = Conversor("pcm", velocidade, saida)
-            conversor.escrever(bytes(pendente))
-    if conversor:
-        conversor.fechar()
-    saida.esperar_esvaziar()
-    saida.fechar_arquivo()
-    log(f"fim motor={item.motor} chars={len(item.limpo)} total={time.time() - item.enfileirado_em:.1f}s")
-    salvar_ultimo(gravado)
+            converter = Converter("pcm", speed, output)
+            converter.write(bytes(pending))
+    if converter:
+        converter.close()
+    output.wait_until_empty()
+    output.close_file()
+    log(f"done engine={item.engine} chars={len(item.clean)} total={time.time() - item.queued_at:.1f}s")
+    save_last(recorded)
 
 
-class ItemArquivo:
-    """Um áudio já pronto (repetir a última fala), tocado pela mesma fila."""
+class FileItem:
+    """A ready audio file (repeat the last utterance), played through the same queue."""
 
-    def __init__(self, caminho: Path, enfileirado_em: float):
-        self.caminho, self.enfileirado_em = caminho, enfileirado_em
+    def __init__(self, path: Path, queued_at: float):
+        self.path, self.queued_at = path, queued_at
 
 
-def tocar(item, saida: Saida) -> None:
-    if isinstance(item, ItemArquivo):
-        log(f"repetindo {item.caminho.name}")
-        saida.nova_fala()
-        Conversor("arquivo", ler_config()["velocidade"], saida, arquivo=item.caminho).fechar()
-        saida.esperar_esvaziar()
-        saida.fechar_arquivo()
-        item.caminho.unlink(missing_ok=True)
+def play(item, output: Output) -> None:
+    if isinstance(item, FileItem):
+        log(f"repeating {item.path.name}")
+        output.new_utterance()
+        Converter("file", read_config()["speed"], output, file=item.path).close()
+        output.wait_until_empty()
+        output.close_file()
+        item.path.unlink(missing_ok=True)
     else:
-        tocar_item(item, saida)
+        play_item(item, output)
 
 
-def repetir_ultimo() -> bool:
-    """Põe uma cópia da última fala na fila (nunca toca por fora dela)."""
-    ultimo = next(iter(BASE.glob("ultimo.*")), None)
-    if not ultimo:
+def repeat_last() -> bool:
+    """Puts a copy of the last utterance in the queue (it never plays outside of it)."""
+    last = next(iter(BASE.glob("last.*")), None)
+    if not last:
         return False
-    parar()
-    FILA.mkdir(parents=True, exist_ok=True)
-    copia = FILA / f"repetir-{time.time_ns()}{ultimo.suffix}"
-    shutil.copy(ultimo, copia)
-    (FILA / f"{time.time_ns()}.ref").write_text(str(copia), encoding="utf-8")
-    iniciar_worker()
+    stop()
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    copy = QUEUE / f"repeat-{time.time_ns()}{last.suffix}"
+    shutil.copy(last, copy)
+    (QUEUE / f"{time.time_ns()}.ref").write_text(str(copy), encoding="utf-8")
+    start_worker()
     return True
 
 
-def worker_ativo() -> int | None:
+def worker_running() -> int | None:
     try:
         pid = int(PIDFILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         return None
-    return pid if "tts.py _worker" in plataforma.comando_do_processo(pid) else None
+    return pid if "tts.py _worker" in platform_support.process_command(pid) else None
 
 
-def pausar() -> bool:
-    """A saída para no ponto exato e entrega silêncio; o resto da fala segue sendo gerado."""
-    if not worker_ativo():
-        return False  # nada falando: não deixa uma pausa "armada" que travaria a próxima fala
-    PAUSADO.touch()
-    log("pausado")
+def pause() -> bool:
+    """The output stops at the exact point and plays silence; the rest of the utterance keeps being generated."""
+    if not worker_running():
+        return False  # nothing speaking: don't leave an "armed" pause that would block the next utterance
+    PAUSED.touch()
+    log("paused")
     return True
 
 
-def continuar() -> None:
-    PAUSADO.unlink(missing_ok=True)
-    log("continuando")
+def resume() -> None:
+    PAUSED.unlink(missing_ok=True)
+    log("resuming")
 
 
-def alternar_pausa() -> str:
-    if PAUSADO.exists():
-        continuar()
-        return "continuando"
-    return "pausado" if pausar() else "nada tocando"
+def toggle_pause() -> str:
+    if PAUSED.exists():
+        resume()
+        return "resuming"
+    return "paused" if pause() else "nothing playing"
 
 
-def parar() -> bool:
-    """Limpa a fila e interrompe a fala atual (espera o worker sair, para não perder o lock)."""
-    for item in FILA.glob("*"):
+def stop() -> bool:
+    """Clears the queue and stops the current utterance (waits for the worker to exit, so the lock isn't lost)."""
+    for item in QUEUE.glob("*"):
         item.unlink(missing_ok=True)
-    PAUSADO.unlink(missing_ok=True)
-    pid = worker_ativo()
+    PAUSED.unlink(missing_ok=True)
+    pid = worker_running()
     if pid:
-        plataforma.encerrar_arvore(pid)
+        platform_support.kill_tree(pid)
     PIDFILE.unlink(missing_ok=True)
     return bool(pid)
 
 
-def enfileirar(texto: str) -> None:
-    FILA.mkdir(parents=True, exist_ok=True)
-    (FILA / f"{time.time_ns()}.txt").write_text(texto, encoding="utf-8")
-    iniciar_worker()
+def enqueue(text: str) -> None:
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    (QUEUE / f"{time.time_ns()}.txt").write_text(text, encoding="utf-8")
+    start_worker()
 
 
-def iniciar_worker() -> None:
-    plataforma.iniciar_destacado([str(PYTHON), str(Path(__file__).resolve()), "_worker"])
+def start_worker() -> None:
+    platform_support.start_detached([str(PYTHON), str(Path(__file__).resolve()), "_worker"])
 
 
-def proximo_item() -> "Item | ItemArquivo | None":
-    for arquivo in sorted(FILA.glob("*"), key=lambda a: a.name):
-        if arquivo.suffix not in (".txt", ".ref"):
+def next_item() -> "Item | FileItem | None":
+    for file in sorted(QUEUE.glob("*"), key=lambda a: a.name):
+        if file.suffix not in (".txt", ".ref"):
             continue
         try:
-            conteudo = arquivo.read_text(encoding="utf-8")
-            arquivo.unlink()
+            content = file.read_text(encoding="utf-8")
+            file.unlink()
         except FileNotFoundError:
             continue
         try:
-            enfileirado_em = int(arquivo.stem) / 1e9
+            queued_at = int(file.stem) / 1e9
         except ValueError:
-            enfileirado_em = time.time()
-        if arquivo.suffix == ".ref":
-            return ItemArquivo(Path(conteudo), enfileirado_em)
-        item = Item(conteudo, enfileirado_em)
-        if item.limpo:
+            queued_at = time.time()
+        if file.suffix == ".ref":
+            return FileItem(Path(content), queued_at)
+        item = Item(content, queued_at)
+        if item.clean:
             return item
     return None
 
 
 def worker() -> None:
-    """Um único worker por vez esvazia a fila. Um alimentador pega cada fala assim que ela
-    chega e já começa a gerar o áudio (até 2 à frente), enquanto a atual toca."""
-    lock = TravaArquivo(LOCK)
-    if not lock.tentar():
-        return  # outro worker já está cuidando da fila
+    """A single worker at a time drains the queue. A feeder takes each utterance as soon as it arrives and
+    starts generating its audio (up to 2 ahead) while the current one plays."""
+    lock = FileLock(LOCK)
+    if not lock.try_lock():
+        return  # another worker is already draining the queue
     PIDFILE.write_text(str(os.getpid()), encoding="utf-8")
-    prontos: queue.Queue = queue.Queue(maxsize=2)
-    trava, encerrar = threading.Lock(), threading.Event()
+    ready: queue.Queue = queue.Queue(maxsize=2)
+    mutex, finish = threading.Lock(), threading.Event()
 
-    def alimentar() -> None:
-        while not encerrar.is_set():
-            with trava:
-                item = None if encerrar.is_set() or prontos.full() else proximo_item()
+    def feed() -> None:
+        while not finish.is_set():
+            with mutex:
+                item = None if finish.is_set() or ready.full() else next_item()
                 if item:
-                    prontos.put(item)
+                    ready.put(item)
             if not item:
                 time.sleep(0.1)
 
-    threading.Thread(target=alimentar, daemon=True).start()
-    saida = None
+    threading.Thread(target=feed, daemon=True).start()
+    output = None
     try:
-        saida = Saida()
+        output = Output()
         while True:
             try:
-                item = prontos.get(timeout=2)
+                item = ready.get(timeout=2)
             except queue.Empty:
-                with trava:  # só encerra se nada chegou nem está sendo preparado
-                    if prontos.empty() and not any(FILA.glob("*.txt")) and not any(FILA.glob("*.ref")):
-                        encerrar.set()
+                with mutex:  # only exits if nothing arrived nor is being prepared
+                    if ready.empty() and not any(QUEUE.glob("*.txt")) and not any(QUEUE.glob("*.ref")):
+                        finish.set()
                         break
                 continue
-            tocar(item, saida)
+            play(item, output)
     except Exception as e:
-        log(f"erro no worker: {e}")
+        log(f"worker error: {e}")
     finally:
-        encerrar.set()
-        if saida:
-            # O stream.stop() do PortAudio já travou para sempre no CoreAudio (AudioOutputUnitStop preso
-            # num mutex): o worker ficava vivo e mudo, segurando o lock, e a fila só crescia. Fechar é
-            # cortesia (a fala já acabou), então espera no máximo 3 s e sai de qualquer jeito.
-            fechando = threading.Thread(target=saida.fechar, daemon=True)
-            fechando.start()
-            fechando.join(3)
-            if fechando.is_alive():
-                log("saída de áudio não fechou em 3 s: encerrando o worker à força")
+        finish.set()
+        if output:
+            # PortAudio's stream.stop() has hung forever in CoreAudio (AudioOutputUnitStop stuck on a mutex): the
+            # worker stayed alive and silent, holding the lock, and the queue only grew. Closing is a courtesy
+            # (the utterance is over), so it waits at most 3 s and exits anyway.
+            closing = threading.Thread(target=output.close, daemon=True)
+            closing.start()
+            closing.join(3)
+            if closing.is_alive():
+                log("audio output didn't close in 3 s: forcing the worker to exit")
         PIDFILE.unlink(missing_ok=True)
-        lock.soltar()
-        if any(FILA.glob("*.txt")) or any(FILA.glob("*.ref")):  # chegou algo enquanto saíamos
-            iniciar_worker()
-        os._exit(0)  # sem isso, uma thread de áudio travada seguraria o processo
+        lock.release()
+        if any(QUEUE.glob("*.txt")) or any(QUEUE.glob("*.ref")):  # something arrived while we were exiting
+            start_worker()
+        os._exit(0)  # without this, a hung audio thread would keep the process alive
 
 
 # ---------------------------------------------------------------- hooks
 
-def ler_cauda(caminho: str, max_bytes: int = 2_000_000) -> list[dict]:
+def read_tail(path: str, max_bytes: int = 2_000_000) -> list[dict]:
     try:
-        with open(caminho, "rb") as f:
+        with open(path, "rb") as f:
             f.seek(0, 2)
-            tamanho = f.tell()
-            f.seek(max(0, tamanho - max_bytes))
-            bruto = f.read().decode(errors="replace")
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            raw = f.read().decode(errors="replace")
     except OSError:
         return []
-    entradas = []
-    for linha in bruto.splitlines():
+    entries = []
+    for line in raw.splitlines():
         try:
-            entradas.append(json.loads(linha))
+            entries.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return entradas
+    return entries
 
 
-def e_narracao(bloco: dict) -> bool:
-    """O app desktop grava parte das mensagens intermediárias como bloco "thinking" marcado
-    como narração na assinatura. Raciocínio de verdade vem marcado como "thinking"."""
-    if bloco.get("type") != "thinking" or not bloco.get("thinking", "").strip():
+def is_narration(block: dict) -> bool:
+    """The desktop app saves some progress notes as a "thinking" block marked as narration in the signature.
+    Real reasoning comes marked as "thinking"."""
+    if block.get("type") != "thinking" or not block.get("thinking", "").strip():
         return False
     try:
-        assinatura = bloco.get("signature", "")
-        return b"narration" in base64.b64decode(assinatura + "=" * (-len(assinatura) % 4))[:80]
+        signature = block.get("signature", "")
+        return b"narration" in base64.b64decode(signature + "=" * (-len(signature) % 4))[:80]
     except ValueError:
         return False
 
 
-def textos_turno_claude(caminho: str) -> tuple[str | None, list[str]]:
-    """Id do turno atual (o uuid da última mensagem real do usuário; None se ela já saiu da cauda lida)
-    e os blocos de texto do assistente desde ela."""
-    textos: list[str] = []
-    turno = None
-    for e in reversed(ler_cauda(caminho)):
-        conteudo = (e.get("message") or {}).get("content")
-        if e.get("type") == "assistant" and isinstance(conteudo, list):
-            textos = [c.get("text", "") if c.get("type") == "text" else c.get("thinking", "")
-                      for c in conteudo if c.get("type") == "text" or e_narracao(c)] + textos
+def claude_turn_texts(path: str) -> tuple[str | None, list[str]]:
+    """Id of the current turn (the uuid of the last real user message; None if it is already outside the tail
+    read) and the assistant text blocks since then."""
+    texts: list[str] = []
+    turn = None
+    for e in reversed(read_tail(path)):
+        content = (e.get("message") or {}).get("content")
+        if e.get("type") == "assistant" and isinstance(content, list):
+            texts = [c.get("text", "") if c.get("type") == "text" else c.get("thinking", "")
+                     for c in content if c.get("type") == "text" or is_narration(c)] + texts
         elif e.get("type") == "user" and not e.get("isMeta"):
-            if isinstance(conteudo, str) or (isinstance(conteudo, list) and any(
-                    c.get("type") == "text" for c in conteudo)):
-                turno = e.get("uuid") or e.get("timestamp")
+            if isinstance(content, str) or (isinstance(content, list) and any(
+                    c.get("type") == "text" for c in content)):
+                turn = e.get("uuid") or e.get("timestamp")
                 break
-    return turno, [t for t in textos if t.strip()]
+    return turn, [t for t in texts if t.strip()]
 
 
-def e_subagente_codex(caminho: str) -> bool:
-    """O cabeçalho da sessão do Codex marca subagentes (thread_source = subagent)."""
+def is_codex_subagent(path: str) -> bool:
+    """The Codex session header marks subagents (thread_source = subagent)."""
     try:
-        with open(caminho, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             meta = json.loads(f.readline()).get("payload") or {}
     except (OSError, ValueError):
         return False
-    origem = meta.get("source")
-    return meta.get("thread_source") == "subagent" or (isinstance(origem, dict) and "subagent" in origem)
+    source = meta.get("source")
+    return meta.get("thread_source") == "subagent" or (isinstance(source, dict) and "subagent" in source)
 
 
-def textos_turno_codex(caminho: str) -> tuple[str | None, list[str]]:
-    """Id do turno atual (turn_id do último task_started; None se ele já saiu da cauda lida)
-    e as mensagens do assistente desde ele."""
-    textos: list[str] = []
-    turno = None
-    for e in reversed(ler_cauda(caminho)):
+def codex_turn_texts(path: str) -> tuple[str | None, list[str]]:
+    """Id of the current turn (turn_id of the last task_started; None if it is already outside the tail read)
+    and the assistant messages since then."""
+    texts: list[str] = []
+    turn = None
+    for e in reversed(read_tail(path)):
         p = e.get("payload") or {}
         if e.get("type") == "event_msg" and p.get("type") == "task_started":
-            turno = p.get("turn_id") or e.get("timestamp")
+            turn = p.get("turn_id") or e.get("timestamp")
             break
         if e.get("type") == "response_item" and p.get("type") == "message" \
                 and p.get("role") == "assistant" and p.get("phase") != "final_answer":
-            textos = [c.get("text", "") for c in p.get("content", [])
-                      if c.get("type") == "output_text"] + textos
-    return turno, [t for t in textos if t.strip()]
+            texts = [c.get("text", "") for c in p.get("content", [])
+                     if c.get("type") == "output_text"] + texts
+    return turn, [t for t in texts if t.strip()]
 
 
-def so_os_novos(sessao: str, turno: str | None, textos: list[str]) -> list[str]:
-    """Filtra o que já foi falado neste turno (evita repetir entre PostToolUse e Stop). Um turno novo
-    começa do zero: a mesma resposta ("Pronto.") num turno seguinte é falada de novo.
-    turno None (início do turno fora da cauda lida) mantém o turno guardado: trocar de turno ali faria
-    a cauda inteira ser falada de novo."""
-    ESTADO.mkdir(parents=True, exist_ok=True)
-    for velho in ESTADO.glob("*.json"):
+def only_new(session: str, turn: str | None, texts: list[str]) -> list[str]:
+    """Filters out what was already spoken in this turn (avoids repeating between PostToolUse and Stop). A new
+    turn starts from scratch: the same reply ("Done.") in a later turn is spoken again.
+    turn None (turn start outside the tail read) keeps the stored turn: switching turns there would make the
+    whole tail be spoken again."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    for old in STATE.glob("*.json"):
         try:
-            if time.time() - velho.stat().st_mtime > 3 * 86400:
-                velho.unlink(missing_ok=True)
+            if time.time() - old.stat().st_mtime > 3 * 86400:
+                old.unlink(missing_ok=True)
         except FileNotFoundError:
-            pass  # outro hook apagou ao mesmo tempo
-    arq = ESTADO / (re.sub(r"[^\w-]", "_", sessao) + ".json")
-    with TravaArquivo(BASE / "estado.lock"):
+            pass  # another hook removed it at the same time
+    file = STATE / (re.sub(r"[^\w-]", "_", session) + ".json")
+    with FileLock(BASE / "state.lock"):
         try:
-            salvo = json.loads(arq.read_text(encoding="utf-8"))
+            stored = json.loads(file.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
-            salvo = {}
-        if isinstance(salvo, list):  # formato antigo (só os hashes, sem turno): vale para o turno atual
-            salvo = {"turno": turno, "vistos": salvo}
-        turno_salvo = salvo.get("turno") if isinstance(salvo, dict) else None
-        vistos = set(salvo.get("vistos", [])) if isinstance(salvo, dict) else set()
-        if turno is not None and turno != turno_salvo:
-            vistos = set()
-        novos = []
-        for t in textos:
+            stored = {}
+        stored_turn = stored.get("turn") if isinstance(stored, dict) else None
+        seen = set(stored.get("seen", [])) if isinstance(stored, dict) else set()
+        if turn is not None and turn != stored_turn:
+            seen = set()
+        new = []
+        for t in texts:
             h = hashlib.sha1(" ".join(t.split()).encode()).hexdigest()[:16]
-            if h not in vistos:
-                vistos.add(h)
-                novos.append(t)
-        arq.write_text(json.dumps({"turno": turno if turno is not None else turno_salvo,
-                                   "vistos": sorted(vistos)}), encoding="utf-8")
-    return novos
+            if h not in seen:
+                seen.add(h)
+                new.append(t)
+        file.write_text(json.dumps({"turn": turn if turn is not None else stored_turn,
+                                    "seen": sorted(seen)}), encoding="utf-8")
+    return new
 
 
-# ---------------------------------------------------------------- conversas (quais podem falar)
+# ---------------------------------------------------------------- conversations (which ones may speak)
 
-CONVERSAS = BASE / "conversas"
-# Conversa "ativa": o processo dela ainda existe e o hook dela disparou há pouco. Duas horas sem nenhum evento
-# (nem ferramenta, nem fim de turno) é uma conversa parada esperando alguém: sai da lista e volta no próximo evento,
-# com a escolha guardada no config. Sem o processo para conferir (Codex, Cursor, registros antigos), 30 minutos.
-JANELA_CONVERSAS = 2 * 3600
-JANELA_SEM_PROCESSO = 30 * 60
+CONVERSATIONS = BASE / "conversations"
+# An "active" conversation: its process still exists and its hook fired recently. Two hours without any event
+# (no tool, no end of turn) is a conversation sitting idle waiting for someone: it leaves the list and comes back
+# with the next event, with the choice kept in the config. Without a process to check (Codex, Cursor, old
+# records), 30 minutes.
+CONVERSATION_WINDOW = 2 * 3600
+WINDOW_WITHOUT_PROCESS = 30 * 60
 
 
-def sessao_sem_ninguem() -> bool:
-    """Execução sem ninguém olhando (claude -p, Agent SDK, os agentes do monitor). O Claude Code marca isso no
-    ambiente de cada processo: CLAUDE_CODE_SESSION_ATTENDED=0 no -p, 1 no app desktop e nos subagentes dele, e o
-    valor não é herdado de quem lançou (um -p disparado de dentro do desktop também vem com 0)."""
+def unattended_session() -> bool:
+    """A run nobody is watching (claude -p, Agent SDK, monitor agents). Claude Code marks it in each process's
+    environment: CLAUDE_CODE_SESSION_ATTENDED=0 in -p, 1 in the desktop app and its subagents, and the value
+    isn't inherited from the launcher (a -p started from inside the desktop app also gets 0)."""
     return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0"
 
 
-def arquivo_conversa(origem: str, sessao: str) -> Path:
-    return CONVERSAS / (re.sub(r"[^\w-]", "_", f"{origem}-{sessao}") + ".json")
+def conversation_file(source: str, session: str) -> Path:
+    return CONVERSATIONS / (re.sub(r"[^\w-]", "_", f"{source}-{session}") + ".json")
 
 
-def titulo_claude(caminho: str) -> str:
-    """Título da conversa no Claude Code: o nome dado a ela, ou o último pedido do usuário."""
-    titulo = pedido = ""
-    for e in ler_cauda(caminho, 400_000):
+def claude_title(path: str) -> str:
+    """The conversation title in Claude Code: the name given to it, or the user's last request."""
+    title = prompt = ""
+    for e in read_tail(path, 400_000):
         if e.get("type") == "custom-title":
-            titulo = e.get("customTitle") or titulo
+            title = e.get("customTitle") or title
         elif e.get("type") == "last-prompt":
-            pedido = e.get("lastPrompt") or pedido
-    return titulo or pedido
+            prompt = e.get("lastPrompt") or prompt
+    return title or prompt
 
 
-def registrar_conversa(origem: str, sessao: str, dados: dict) -> None:
-    """Anota que a conversa existe (mesmo desligada ou fora da lista), para aparecer no menu."""
-    pasta = dados.get("cwd") or next(iter(dados.get("workspace_roots") or []), "")
-    arq = arquivo_conversa(origem, sessao)
+def register_conversation(source: str, session: str, data: dict) -> None:
+    """Notes that the conversation exists (even when off or out of the list), so it shows up in the menu."""
+    folder = data.get("cwd") or next(iter(data.get("workspace_roots") or []), "")
+    file = conversation_file(source, session)
     try:
-        CONVERSAS.mkdir(parents=True, exist_ok=True)
-        for velha in CONVERSAS.glob("*.json"):
-            if time.time() - velha.stat().st_mtime > 3 * 86400:
-                velha.unlink(missing_ok=True)
+        CONVERSATIONS.mkdir(parents=True, exist_ok=True)
+        for old in CONVERSATIONS.glob("*.json"):
+            if time.time() - old.stat().st_mtime > 3 * 86400:
+                old.unlink(missing_ok=True)
         try:
-            antigo = json.loads(arq.read_text(encoding="utf-8"))
+            previous = json.loads(file.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
-            antigo = {}
-        titulo = titulo_claude(dados.get("transcript_path") or "") if origem == "claude" else ""
-        pid = os.environ.get("CLAUDE_PID", "")  # o processo do Claude Code dono da conversa
-        arq.write_text(json.dumps({
-            "id": f"{origem}:{sessao}", "origem": origem, "ts": time.time(),
+            previous = {}
+        title = claude_title(data.get("transcript_path") or "") if source == "claude" else ""
+        pid = os.environ.get("CLAUDE_PID", "")  # the Claude Code process that owns the conversation
+        file.write_text(json.dumps({
+            "id": f"{source}:{session}", "source": source, "ts": time.time(),
             "pid": int(pid) if pid.isdigit() else None,
-            "pasta": Path(pasta).name if pasta else antigo.get("pasta", ""),
-            "titulo": (titulo or antigo.get("titulo", "")).strip()[:80],
+            "folder": Path(folder).name if folder else previous.get("folder", ""),
+            "title": (title or previous.get("title", "")).strip()[:80],
         }, ensure_ascii=False), encoding="utf-8")
     except OSError as e:
-        log(f"conversa não registrada: {e}")
+        log(f"conversation not registered: {e}")
 
 
-def conversas_ativas() -> list[dict]:
-    """Conversas vistas nas últimas horas, a mais recente primeiro."""
-    lista = []
-    for arq in CONVERSAS.glob("*.json"):
+def active_conversations() -> list[dict]:
+    """Conversations seen in the last hours, the most recent first."""
+    found = []
+    for file in CONVERSATIONS.glob("*.json"):
         try:
-            if time.time() - arq.stat().st_mtime > JANELA_CONVERSAS:
-                continue  # o "ts" é gravado junto com o arquivo: velho pela data já está fora (o menu lê a cada 1 s)
-            c = json.loads(arq.read_text(encoding="utf-8"))
+            if time.time() - file.stat().st_mtime > CONVERSATION_WINDOW:
+                continue  # "ts" is written with the file: old by date is already out (the menu reads every 1 s)
+            c = json.loads(file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         pid = c.get("pid")
-        if pid and not plataforma.processo_vivo(pid):
-            continue  # o processo acabou sem SessionEnd (fechado à força, travou)
-        if time.time() - c.get("ts", 0) <= (JANELA_CONVERSAS if pid else JANELA_SEM_PROCESSO):
-            lista.append(c)
-    return sorted(lista, key=lambda c: c["ts"], reverse=True)
+        if pid and not platform_support.process_alive(pid):
+            continue  # the process ended without SessionEnd (force quit, hang)
+        if time.time() - c.get("ts", 0) <= (CONVERSATION_WINDOW if pid else WINDOW_WITHOUT_PROCESS):
+            found.append(c)
+    return sorted(found, key=lambda c: c["ts"], reverse=True)
 
 
-def conversa_ouvida(cfg: dict, id_: str) -> bool:
-    return not cfg.get("so_conversas_escolhidas") or id_ in cfg.get("conversas_ouvir", [])
+def conversation_heard(cfg: dict, id_: str) -> bool:
+    return not cfg.get("only_chosen_conversations") or id_ in cfg.get("chosen_conversations", [])
 
 
-def alternar_conversa(id_: str) -> bool:
-    """Liga ou desliga uma conversa na lista de escolhidas; devolve se ela passou a ser ouvida."""
-    cfg = ler_config()
-    ouvir = [i for i in cfg.get("conversas_ouvir", []) if i != id_]
-    entrou = id_ not in cfg.get("conversas_ouvir", [])
-    if entrou:
-        ouvir.append(id_)
-    salvar_config(dict(cfg, conversas_ouvir=ouvir))
-    return entrou
+def toggle_conversation(id_: str) -> bool:
+    """Adds or removes a conversation from the chosen list; returns whether it is now heard."""
+    cfg = read_config()
+    chosen = [i for i in cfg.get("chosen_conversations", []) if i != id_]
+    added = id_ not in cfg.get("chosen_conversations", [])
+    if added:
+        chosen.append(id_)
+    save_config(dict(cfg, chosen_conversations=chosen))
+    return added
 
 
-def nome_conversa(c: dict) -> str:
-    base = c.get("titulo") or c.get("pasta") or c["id"].split(":", 1)[1][:8]
-    pasta = f" · {c['pasta']}" if c.get("titulo") and c.get("pasta") else ""
-    return f"{base}{pasta}  ({c['origem'].capitalize()})"
+def conversation_name(c: dict) -> str:
+    name = c.get("title") or c.get("folder") or c["id"].split(":", 1)[1][:8]
+    folder = f" · {c['folder']}" if c.get("title") and c.get("folder") else ""
+    return f"{name}{folder}  ({c['source'].capitalize()})"
 
 
-def hook(origem: str, evento: str) -> None:
+def hook(source: str, event: str) -> None:
     try:
-        dados = json.loads(sys.stdin.read() or "{}")
+        data = json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError:
-        dados = {}
-    if origem in ("codex", "cursor"):
-        print("{}")  # Codex exige JSON no stdout; Cursor aceita
+        data = {}
+    if source in ("codex", "cursor"):
+        print("{}")  # Codex requires JSON on stdout; Cursor accepts it
         sys.stdout.flush()
-    sessao = str(dados.get("session_id") or dados.get("conversation_id") or origem)
-    if evento == "fim" or sessao_sem_ninguem():
-        # fim da sessão (SessionEnd), ou execução sem ninguém olhando: some da lista e nunca fala
-        arquivo_conversa(origem, sessao).unlink(missing_ok=True)
+    session = str(data.get("session_id") or data.get("conversation_id") or source)
+    if event == "end" or unattended_session():
+        # end of the session (SessionEnd), or a run nobody is watching: leaves the list and never speaks
+        conversation_file(source, session).unlink(missing_ok=True)
         return
-    if origem == "codex" and not ler_config().get("subagentes_codex", False) \
-            and e_subagente_codex(dados.get("transcript_path") or ""):
-        return  # resposta de subagente, não a conversa principal
-    if origem == "cursor" or evento == "stop":
-        guardar_ultima_final(origem, dados.get("text") or dados.get("last_assistant_message") or "")
-    cfg = ler_config()
-    registrar_conversa(origem, sessao, dados)
-    if not cfg["ativo"] or PAUSADO.exists() or (evento == "tool" and not cfg.get("intermediarias", True)):
-        return  # desligada ou pausada: nada entra na fila
-    transcript = dados.get("transcript_path") or ""
+    if source == "codex" and not read_config().get("codex_subagents", False) \
+            and is_codex_subagent(data.get("transcript_path") or ""):
+        return  # a subagent's answer, not the main conversation
+    if source == "cursor" or event == "stop":
+        store_last_final(source, data.get("text") or data.get("last_assistant_message") or "")
+    cfg = read_config()
+    register_conversation(source, session, data)
+    if not cfg["enabled"] or PAUSED.exists() or (event == "tool" and not cfg.get("progress_notes", True)):
+        return  # off or paused: nothing enters the queue
+    transcript = data.get("transcript_path") or ""
     final = ""
-    if origem == "cursor":
-        # cada afterAgentResponse é uma resposta: o generation_id separa um turno do outro
-        turno = dados.get("generation_id") or None
-        intermediarias, final = [], dados.get("text") or ""
+    if source == "cursor":
+        # each afterAgentResponse is one answer: the generation_id separates one turn from the next
+        turn = data.get("generation_id") or None
+        notes, final = [], data.get("text") or ""
     else:
-        turno, intermediarias = (textos_turno_claude if origem == "claude" else textos_turno_codex)(
+        turn, notes = (claude_turn_texts if source == "claude" else codex_turn_texts)(
             transcript) if transcript else (None, [])
-        turno = turno or dados.get("turn_id") or None
-        if evento == "stop":
-            final = dados.get("last_assistant_message") or (intermediarias[-1] if intermediarias else "")
-            final_limpo = limpar(final, 10_000)[:200]
-            intermediarias = [t for t in intermediarias
-                              if not final_limpo or not limpar(t, 10_000).startswith(final_limpo[:150])]
-    if not cfg.get("intermediarias", True):
-        intermediarias = []
-    novos = so_os_novos(sessao, turno, [t for t in intermediarias + [final] if t.strip()])
-    if not conversa_ouvida(cfg, f"{origem}:{sessao}"):
-        return  # conversa não escolhida: o que ela disse conta como visto, para não vir de uma vez ao escolhê-la
-    for t in novos:
-        e_final = t is final
-        falar = t
-        log(f"hook origem={origem} evento={evento} final={e_final} "
-            f"chars={len(t)}->{len(falar)}")
-        enfileirar(falar)
-
-# ---------------------------------------------------------------- falar agora
-
-ULTIMAS = BASE / "ultimas"
+        turn = turn or data.get("turn_id") or None
+        if event == "stop":
+            final = data.get("last_assistant_message") or (notes[-1] if notes else "")
+            final_clean = clean_text(final, 10_000)[:200]
+            notes = [t for t in notes
+                     if not final_clean or not clean_text(t, 10_000).startswith(final_clean[:150])]
+    if not cfg.get("progress_notes", True):
+        notes = []
+    new = only_new(session, turn, [t for t in notes + [final] if t.strip()])
+    if not conversation_heard(cfg, f"{source}:{session}"):
+        return  # conversation not chosen: what it said counts as seen, so it doesn't all come at once when chosen
+    for t in new:
+        log(f"hook source={source} event={event} final={t is final} chars={len(t)}")
+        enqueue(t)
 
 
-def guardar_ultima_final(origem: str, texto: str) -> None:
-    """Cache da última resposta final de cada ferramenta (vale mesmo com a leitura desligada)."""
-    if texto.strip():
-        ULTIMAS.mkdir(parents=True, exist_ok=True)
-        (ULTIMAS / f"{origem}.json").write_text(
-            json.dumps({"ts": time.time(), "texto": texto}, ensure_ascii=False), encoding="utf-8")
+# ---------------------------------------------------------------- speak now
+
+LAST_ANSWERS = BASE / "last_answers"
 
 
-def mais_recente(*padroes: str) -> Path | None:
-    arquivos = [a for p in padroes for a in glob.glob(os.path.expanduser(p))]
-    return Path(max(arquivos, key=os.path.getmtime)) if arquivos else None
+def store_last_final(source: str, text: str) -> None:
+    """Cache of each tool's last final answer (kept even with reading off)."""
+    if text.strip():
+        LAST_ANSWERS.mkdir(parents=True, exist_ok=True)
+        (LAST_ANSWERS / f"{source}.json").write_text(
+            json.dumps({"ts": time.time(), "text": text}, ensure_ascii=False), encoding="utf-8")
 
 
-def para_epoch(iso: str | None, padrao: float) -> float:
+def most_recent(*patterns: str) -> Path | None:
+    files = [a for p in patterns for a in glob.glob(os.path.expanduser(p))]
+    return Path(max(files, key=os.path.getmtime)) if files else None
+
+
+def to_epoch(iso: str | None, default: float) -> float:
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
     except (AttributeError, ValueError):
-        return padrao
+        return default
 
 
-def final_claude() -> tuple[float, str] | None:
-    arq = mais_recente("~/.claude/projects/*/*.jsonl")
-    if not arq:
+def claude_final() -> tuple[float, str] | None:
+    file = most_recent("~/.claude/projects/*/*.jsonl")
+    if not file:
         return None
-    entradas = ler_cauda(str(arq))
-    for e in reversed(entradas):
+    entries = read_tail(str(file))
+    for e in reversed(entries):
         msg = e.get("message") or {}
-        blocos = msg.get("content") if isinstance(msg.get("content"), list) else []
+        blocks = msg.get("content") if isinstance(msg.get("content"), list) else []
         if e.get("type") == "assistant" and msg.get("stop_reason") == "end_turn" \
-                and any(b.get("type") == "text" for b in blocos):
-            mesma = [b.get("text", "") for x in entradas if x.get("type") == "assistant"
-                     and (x.get("message") or {}).get("id") == msg.get("id")
-                     for b in (x["message"].get("content") or []) if b.get("type") == "text"]
-            return para_epoch(e.get("timestamp"), arq.stat().st_mtime), "\n\n".join(mesma)
+                and any(b.get("type") == "text" for b in blocks):
+            same = [b.get("text", "") for x in entries if x.get("type") == "assistant"
+                    and (x.get("message") or {}).get("id") == msg.get("id")
+                    for b in (x["message"].get("content") or []) if b.get("type") == "text"]
+            return to_epoch(e.get("timestamp"), file.stat().st_mtime), "\n\n".join(same)
     return None
 
 
-def final_codex() -> tuple[float, str] | None:
-    arquivos = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")),
-                      key=os.path.getmtime, reverse=True)
-    arq = next((Path(a) for a in arquivos[:20] if ler_config().get("subagentes_codex", False)
-                or not e_subagente_codex(a)), None)
-    if not arq:
+def codex_final() -> tuple[float, str] | None:
+    files = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")),
+                   key=os.path.getmtime, reverse=True)
+    file = next((Path(a) for a in files[:20] if read_config().get("codex_subagents", False)
+                 or not is_codex_subagent(a)), None)
+    if not file:
         return None
-    for e in reversed(ler_cauda(str(arq))):
+    for e in reversed(read_tail(str(file))):
         p = e.get("payload") or {}
-        ts = para_epoch(e.get("timestamp"), arq.stat().st_mtime)
+        ts = to_epoch(e.get("timestamp"), file.stat().st_mtime)
         if e.get("type") == "event_msg" and p.get("type") == "task_complete" \
                 and p.get("last_agent_message"):
             return ts, p["last_agent_message"]
         if e.get("type") == "response_item" and p.get("type") == "message" \
                 and p.get("role") == "assistant" and p.get("phase") == "final_answer":
-            texto = "\n\n".join(c.get("text", "") for c in p.get("content", [])
-                                if c.get("type") == "output_text")
-            if texto.strip():
-                return ts, texto
+            text = "\n\n".join(c.get("text", "") for c in p.get("content", [])
+                               if c.get("type") == "output_text")
+            if text.strip():
+                return ts, text
     return None
 
 
-def final_cursor() -> tuple[float, str] | None:
-    arq = mais_recente("~/.cursor/projects/*/agent-transcripts/*/*.jsonl",
+def cursor_final() -> tuple[float, str] | None:
+    file = most_recent("~/.cursor/projects/*/agent-transcripts/*/*.jsonl",
                        "~/.cursor/projects/*/agent-transcripts/*.jsonl")
-    if not arq:
+    if not file:
         return None
-    turno_encerrado = False
-    for e in reversed(ler_cauda(str(arq))):
+    turn_ended = False
+    for e in reversed(read_tail(str(file))):
         if e.get("type") == "turn_ended":
-            turno_encerrado = True
-        elif turno_encerrado and e.get("role") == "assistant":
-            textos = [c.get("text", "") for c in (e.get("message") or {}).get("content", [])
-                      if c.get("type") == "text"]
-            texto = "\n\n".join(t.replace("[REDACTED]", "").strip() for t in textos).strip()
-            if texto:
-                return arq.stat().st_mtime, texto
+            turn_ended = True
+        elif turn_ended and e.get("role") == "assistant":
+            texts = [c.get("text", "") for c in (e.get("message") or {}).get("content", [])
+                     if c.get("type") == "text"]
+            text = "\n\n".join(t.replace("[REDACTED]", "").strip() for t in texts).strip()
+            if text:
+                return file.stat().st_mtime, text
     return None
 
 
-def ultima_final() -> tuple[float, str, str] | None:
-    """A resposta final mais recente entre Claude Code, Codex e Cursor."""
-    candidatos = []
-    for arq in ULTIMAS.glob("*.json"):
+def latest_final() -> tuple[float, str, str] | None:
+    """The most recent final answer among Claude Code, Codex and Cursor."""
+    candidates = []
+    for file in LAST_ANSWERS.glob("*.json"):
         try:
-            d = json.loads(arq.read_text(encoding="utf-8"))
-            candidatos.append((d["ts"] + 2, arq.stem, d["texto"]))  # empate: o hook é mais fiel
+            d = json.loads(file.read_text(encoding="utf-8"))
+            candidates.append((d["ts"] + 2, file.stem, d["text"]))  # tie: the hook is more faithful
         except (OSError, ValueError, KeyError):
             pass
-    for origem, achar in (("claude", final_claude), ("codex", final_codex), ("cursor", final_cursor)):
+    for source, find in (("claude", claude_final), ("codex", codex_final), ("cursor", cursor_final)):
         try:
-            if r := achar():
-                candidatos.append((r[0], origem, r[1]))
+            if r := find():
+                candidates.append((r[0], source, r[1]))
         except Exception as e:
-            log(f"agora: falha lendo {origem}: {e}")
-    candidatos = [c for c in candidatos if c[2].strip()]
-    return max(candidatos, key=lambda c: c[0]) if candidatos else None
+            log(f"now: failed reading {source}: {e}")
+    candidates = [c for c in candidates if c[2].strip()]
+    return max(candidates, key=lambda c: c[0]) if candidates else None
 
 
-def falar_agora() -> str:
-    achado = ultima_final()
-    if not achado:
-        return "Não achei nenhuma resposta final."
-    ts, origem, texto = achado
-    parar()
-    falar = texto
-    log(f"agora origem={origem} chars={len(texto)}->{len(falar)}")
-    enfileirar(falar)
-    return f"Lendo a última resposta do {origem.capitalize()} ({time.strftime('%H:%M', time.localtime(ts))})."
+def speak_now() -> str:
+    found = latest_final()
+    if not found:
+        return "No final answer found."
+    ts, source, text = found
+    stop()
+    log(f"now source={source} chars={len(text)}")
+    enqueue(text)
+    return f"Reading the latest {source.capitalize()} answer ({time.strftime('%H:%M', time.localtime(ts))})."
 
 
-# ---------------------------------------------------------------- falar seleção
+# ---------------------------------------------------------------- speak selection
 
-def _selecao_por_acessibilidade() -> str:
-    """Lê a seleção direto do app em foco, sem tocar na área de transferência."""
+def _selection_via_accessibility() -> str:
+    """Reads the selection straight from the frontmost app, without touching the clipboard."""
     import ApplicationServices as AS
     from AppKit import NSWorkspace
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     if not app:
         return ""
-    # pedir o foco ao app em primeiro plano funciona onde o "foco do sistema" falha (erro -25204)
-    elemento = AS.AXUIElementCreateApplication(app.processIdentifier())
-    erro, foco = AS.AXUIElementCopyAttributeValue(elemento, AS.kAXFocusedUIElementAttribute, None)
-    if erro or not foco:
+    # asking the frontmost app for its focus works where the "system focus" fails (error -25204)
+    element = AS.AXUIElementCreateApplication(app.processIdentifier())
+    error, focus = AS.AXUIElementCopyAttributeValue(element, AS.kAXFocusedUIElementAttribute, None)
+    if error or not focus:
         return ""
-    erro, texto = AS.AXUIElementCopyAttributeValue(foco, AS.kAXSelectedTextAttribute, None)
-    return str(texto) if not erro and texto else ""
+    error, text = AS.AXUIElementCopyAttributeValue(focus, AS.kAXSelectedTextAttribute, None)
+    return str(text) if not error and text else ""
 
 
-def _selecao_por_copia() -> str:
-    """Reserva para apps que não expõem a seleção: ⌘C, lê e devolve a área de transferência."""
+def _selection_via_copy() -> str:
+    """Fallback for apps that don't expose the selection: ⌘C, read, then restore the clipboard."""
     import Quartz
     from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
     pb = NSPasteboard.generalPasteboard()
-    guardado = [{t: item.dataForType_(t) for t in item.types()} for item in (pb.pasteboardItems() or [])]
-    contagem = pb.changeCount()
-    fonte = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-    for apertado in (True, False):
-        evento = Quartz.CGEventCreateKeyboardEvent(fonte, 8, apertado)  # tecla C
-        Quartz.CGEventSetFlags(evento, Quartz.kCGEventFlagMaskCommand)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, evento)
+    saved = [{t: item.dataForType_(t) for t in item.types()} for item in (pb.pasteboardItems() or [])]
+    count = pb.changeCount()
+    source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    for pressed in (True, False):
+        event = Quartz.CGEventCreateKeyboardEvent(source, 8, pressed)  # the C key
+        Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
     for _ in range(25):
-        if pb.changeCount() != contagem:
+        if pb.changeCount() != count:
             break
         time.sleep(0.02)
-    texto = pb.stringForType_(NSPasteboardTypeString) if pb.changeCount() != contagem else ""
-    if pb.changeCount() != contagem:  # devolve o que estava antes
+    text = pb.stringForType_(NSPasteboardTypeString) if pb.changeCount() != count else ""
+    if pb.changeCount() != count:  # puts back what was there before
         pb.clearContents()
-        itens = []
-        for tipos in guardado:
-            novo = NSPasteboardItem.alloc().init()
-            for tipo, dados in tipos.items():
-                if dados is not None:
-                    novo.setData_forType_(dados, tipo)
-            itens.append(novo)
-        if itens:
-            pb.writeObjects_(itens)
-    return str(texto or "")
+        items = []
+        for types in saved:
+            new = NSPasteboardItem.alloc().init()
+            for kind, data in types.items():
+                if data is not None:
+                    new.setData_forType_(data, kind)
+            items.append(new)
+        if items:
+            pb.writeObjects_(items)
+    return str(text or "")
 
 
-def texto_selecionado() -> str:
+def selected_text() -> str:
     if WINDOWS:
-        import win_integracao
-        return win_integracao.texto_selecionado()
+        import win_integration
+        return win_integration.selected_text()
     try:
-        texto = _selecao_por_acessibilidade()
+        text = _selection_via_accessibility()
     except Exception as e:
-        log(f"seleção por acessibilidade: {e}")
-        texto = ""
-    if texto.strip():
-        return texto
+        log(f"selection via accessibility: {e}")
+        text = ""
+    if text.strip():
+        return text
     try:
-        return _selecao_por_copia()
+        return _selection_via_copy()
     except Exception as e:
-        log(f"seleção por cópia: {e}")
+        log(f"selection via copy: {e}")
         return ""
 
 
-def falar_selecao() -> str:
-    """Como o 'Falar seleção' do macOS: se já está falando, para; senão, lê o texto selecionado."""
-    if worker_ativo():
-        parar()
-        return "parado"
-    texto = texto_selecionado()
-    if not texto.strip():
-        return "nada selecionado"
-    log(f"seleção chars={len(texto)}")
-    enfileirar(texto)
-    return "lendo a seleção"
+def speak_selection() -> str:
+    """Like macOS Speak Selection: if it is already speaking, stop; otherwise read the selected text."""
+    if worker_running():
+        stop()
+        return "stopped"
+    text = selected_text()
+    if not text.strip():
+        return "nothing selected"
+    log(f"selection chars={len(text)}")
+    enqueue(text)
+    return "reading the selection"
 
 
-# ---------------------------------------------------------------- chave e diagnóstico
+# ---------------------------------------------------------------- key and doctor
 
-def guardar_chave_da_area_de_transferencia(nome: str, arquivo: str = "") -> str:
-    """Guarda a chave copiada (ou lida de um arquivo, que é apagado depois de importado)."""
-    servico = {"gemini": "tts-gemini", "elevenlabs": "tts-elevenlabs"}.get(nome)
-    if not servico:
-        sys.exit("Use: tts chave gemini [arquivo]")
-    origem = Path(arquivo) if arquivo else None
-    texto = origem.read_text(encoding="utf-8-sig") if origem else plataforma.ler_area_de_transferencia()
-    valor = "".join(texto.split())
-    if len(valor) < 20:
-        sys.exit("Não achei uma chave " + ("no arquivo." if origem else "na área de transferência. Copie a chave e rode de novo."))
-    if servico == "tts-elevenlabs" and not valor.startswith("sk_"):
-        sys.exit("Isso não parece uma chave do ElevenLabs (elas começam com sk_). Nada foi salvo.")
-    if servico == "tts-gemini" and valor.startswith("sk_"):
-        sys.exit("Isso parece uma chave do ElevenLabs, não do Gemini. Nada foi salvo.")
-    plataforma.guardar_chave(servico, valor)
-    if origem:
-        origem.unlink(missing_ok=True)
-        return f"{servico} salva ({valor[:4]}…, {len(valor)} caracteres). Arquivo da chave apagado."
-    plataforma.limpar_area_de_transferencia()
-    return f"{servico} salva ({valor[:4]}…, {len(valor)} caracteres). Área de transferência limpa."
+def store_key_from_clipboard(name: str, file: str = "") -> str:
+    """Stores the copied key (or one read from a file, which is deleted after the import)."""
+    service = {"gemini": "tts-gemini", "elevenlabs": "tts-elevenlabs"}.get(name)
+    if not service:
+        sys.exit("Use: tts key gemini [file]")
+    source = Path(file) if file else None
+    text = source.read_text(encoding="utf-8-sig") if source else platform_support.read_clipboard()
+    value = "".join(text.split())
+    if len(value) < 20:
+        sys.exit("No key found " + ("in the file." if source else "on the clipboard. Copy the key and run it again."))
+    if service == "tts-elevenlabs" and not value.startswith("sk_"):
+        sys.exit("This doesn't look like an ElevenLabs key (they start with sk_). Nothing was saved.")
+    if service == "tts-gemini" and value.startswith("sk_"):
+        sys.exit("This looks like an ElevenLabs key, not a Gemini one. Nothing was saved.")
+    platform_support.store_key(service, value)
+    if source:
+        source.unlink(missing_ok=True)
+        return f"{service} saved ({value[:4]}…, {len(value)} characters). Key file deleted."
+    platform_support.clear_clipboard()
+    return f"{service} saved ({value[:4]}…, {len(value)} characters). Clipboard cleared."
 
 
-def diagnostico() -> bool:
-    """Confere o que o tts precisa para funcionar neste computador."""
+def doctor() -> bool:
+    """Checks what tts needs to work on this computer."""
     ok = True
 
-    def linha(nome: str, bom: bool, detalhe: str = "") -> None:
+    def line(name: str, good: bool, detail: str = "") -> None:
         nonlocal ok
-        ok &= bom
-        print(f"  {'✅' if bom else '❌'} {nome}{': ' + detalhe if detalhe else ''}")
+        ok &= good
+        print(f"  {'✅' if good else '❌'} {name}{': ' + detail if detail else ''}")
 
-    print(f"Sistema: {sys.platform} · Python {sys.version.split()[0]}")
-    for programa in ("ffmpeg", "ffprobe"):
-        caminho = plataforma.binario(programa)
-        linha(programa, bool(shutil.which(caminho) or Path(caminho).exists()), caminho)
+    print(f"System: {sys.platform} · Python {sys.version.split()[0]}")
+    for program in ("ffmpeg", "ffprobe"):
+        path = find_binary(program)
+        line(program, bool(shutil.which(path) or Path(path).exists()), path)
     try:
         import sounddevice as sd
-        linha("saída de áudio", True, sd.query_devices(kind="output")["name"])
+        line("audio output", True, sd.query_devices(kind="output")["name"])
     except Exception as e:
-        linha("saída de áudio", False, str(e)[:100])
+        line("audio output", False, str(e)[:100])
     try:
         import edge_tts  # noqa: F401
-        linha("edge-tts (voz reserva)", True)
+        line("edge-tts (fallback voice)", True)
     except ImportError:
-        linha("edge-tts (voz reserva)", False, "pip install edge-tts")
-    linha("chave do Gemini", bool(plataforma.ler_chave("tts-gemini")),
-          "" if plataforma.ler_chave("tts-gemini") else "rode: tts chave gemini")
+        line("edge-tts (fallback voice)", False, "pip install edge-tts")
+    has_key = bool(platform_support.read_key("tts-gemini"))
+    line("Gemini key", has_key, "" if has_key else "run: tts key gemini")
+    language = current_language(read_config())
+    line("voice language", True, f"{language} ({LANGUAGES[language]['name']})")
     if WINDOWS:
-        for modulo in ("keyring", "psutil", "pystray", "PIL"):
+        for module in ("keyring", "psutil", "pystray", "PIL"):
             try:
-                __import__(modulo)
-                linha(modulo, True)
+                __import__(module)
+                line(module, True)
             except ImportError:
-                linha(modulo, False, "pip install")
-    configuracoes = {"Claude Code": Path.home() / ".claude/settings.json",
-                     "Codex": Path.home() / ".codex/hooks.json", "Cursor": Path.home() / ".cursor/hooks.json"}
-    for nome, caminho in configuracoes.items():
-        if caminho.exists():
-            linha(f"hooks do {nome}", "tts.py" in caminho.read_text(encoding="utf-8"),
-                  "" if "tts.py" in caminho.read_text(encoding="utf-8") else "rode configurar_hooks.py instalar")
-    print("Tudo certo." if ok else "Há itens para corrigir.")
+                line(module, False, "pip install")
+    settings = {"Claude Code": Path.home() / ".claude/settings.json",
+                "Codex": Path.home() / ".codex/hooks.json", "Cursor": Path.home() / ".cursor/hooks.json"}
+    for name, path in settings.items():
+        if path.exists():
+            installed = ".agent-tts" in path.read_text(encoding="utf-8")
+            line(f"{name} hooks", installed, "" if installed else "run configure_hooks.py install")
+    print("All good." if ok else "Some items need fixing.")
     return ok
 
 
 # ---------------------------------------------------------------- CLI
 
 def status(cfg: dict) -> None:
-    print(f"Leitura:    {'ligada' if cfg['ativo'] else 'DESLIGADA'}")
-    print(f"Voz:        {cfg['voz']} ({VOZES_GEMINI.get(cfg['voz'], '?')})")
-    print(f"Velocidade: {cfg['velocidade']:.1f}x  (sobre o ritmo 'rápido' do Gemini)")
-    print(f"Falando:    {'sim' if worker_ativo() else 'não'}  ·  na fila: {len(list(FILA.glob('*.txt')))}")
+    language = current_language(cfg)
+    print(f"Reading:    {'on' if cfg['enabled'] else 'OFF'}")
+    print(f"Language:   {LANGUAGES[language]['name']} ({language}{'' if cfg.get('language') else ', from the system'})")
+    gender, description = GEMINI_VOICES.get(cfg["voice"], ("?", "?"))
+    print(f"Voice:      {cfg['voice']} ({gender}, {description})")
+    print(f"Speed:      {cfg['speed']:.1f}x  (on top of Gemini's 'fast' pace)")
+    print(f"Speaking:   {'yes' if worker_running() else 'no'}  ·  queued: {len(list(QUEUE.glob('*.txt')))}")
+
+
+def turned_on(args: list[str]) -> bool:
+    return args[1] in ("on", "yes", "true", "1")
 
 
 def main() -> None:
     a = sys.argv[1:]
     cmd = a[0] if a else "status"
-    cfg = ler_config()
+    cfg = read_config()
 
     if cmd == "_worker":
         worker()
@@ -1269,94 +1404,110 @@ def main() -> None:
     elif cmd == "status":
         status(cfg)
     elif cmd in ("on", "off"):
-        cfg["ativo"] = cmd == "on"
-        salvar_config(cfg)
+        cfg["enabled"] = cmd == "on"
+        save_config(cfg)
         if cmd == "off":
-            parar()
-        print(f"Leitura {'ligada' if cfg['ativo'] else 'desligada'}.")
-    elif cmd == "voz":
+            stop()
+        print(f"Reading {'on' if cfg['enabled'] else 'off'}.")
+    elif cmd == "language":
+        if len(a) > 1:
+            code = next((c for c in LANGUAGES if c.lower() == a[1].lower()), None)
+            if a[1].lower() in ("system", "auto"):
+                code = ""
+            elif not code:
+                sys.exit(f"Unknown language: {a[1]}. See: tts languages")
+            cfg["language"] = code
+            save_config(cfg)
+        language = current_language(cfg)
+        print(f"Language: {LANGUAGES[language]['name']} ({language}{'' if cfg.get('language') else ', from the system'})")
+    elif cmd == "languages":
+        current = current_language(cfg)
+        for code, language in LANGUAGES.items():
+            print(f"{'→' if code == current else ' '} {code:<6} {language['name']}")
+        print("  system: follow the system language (tts language system)")
+    elif cmd == "voice":
         if len(a) == 1:
             status(cfg)
             return
-        nome = next((v for v in VOZES_GEMINI if v.lower() == a[1].lower()), None)
-        if not nome:
-            sys.exit(f"Voz desconhecida: {a[1]}. Veja: tts vozes")
-        cfg["voz"] = nome
-        salvar_config(cfg)
-        print(f"Voz: {nome} ({VOZES_GEMINI[nome]})")
-    elif cmd == "vozes":
-        for v, d in VOZES_GEMINI.items():
-            print(f"{'→' if v == cfg['voz'] else ' '} {v:<14} {d}")
-    elif cmd in ("velocidade", "mais", "menos"):
-        if cmd == "velocidade" and len(a) == 1:
-            print(f"Velocidade: {cfg['velocidade']:.1f}x")
+        name = next((v for v in GEMINI_VOICES if v.lower() == a[1].lower()), None)
+        if not name:
+            sys.exit(f"Unknown voice: {a[1]}. See: tts voices")
+        cfg["voice"] = name
+        save_config(cfg)
+        print(f"Voice: {name} ({', '.join(GEMINI_VOICES[name])})")
+    elif cmd == "voices":
+        for v, (gender, description) in GEMINI_VOICES.items():
+            print(f"{'→' if v == cfg['voice'] else ' '} {v:<14} {gender}, {description}")
+    elif cmd in ("speed", "faster", "slower"):
+        if cmd == "speed" and len(a) == 1:
+            print(f"Speed: {cfg['speed']:.1f}x")
             return
-        if cmd == "velocidade":
+        if cmd == "speed":
             v = float(a[1].replace(",", "."))
         else:
-            v = cfg["velocidade"] + (0.1 if cmd == "mais" else -0.1)
-        cfg["velocidade"] = round(min(2.0, max(1.0, v)), 2)
-        salvar_config(cfg)
-        print(f"Velocidade: {cfg['velocidade']:.1f}x")
-    elif cmd == "subagentes":
+            v = cfg["speed"] + (0.1 if cmd == "faster" else -0.1)
+        cfg["speed"] = round(min(2.0, max(1.0, v)), 2)
+        save_config(cfg)
+        print(f"Speed: {cfg['speed']:.1f}x")
+    elif cmd == "subagents":
         if len(a) > 1:
-            cfg["subagentes_codex"] = a[1] in ("on", "sim", "ligar")
-            salvar_config(cfg)
-        print(f"Subagentes do Codex: {'lidos' if cfg.get('subagentes_codex') else 'ignorados'}")
-    elif cmd == "intermediarias":
+            cfg["codex_subagents"] = turned_on(a)
+            save_config(cfg)
+        print(f"Codex subagents: {'read' if cfg.get('codex_subagents') else 'ignored'}")
+    elif cmd == "progress":
         if len(a) > 1:
-            cfg["intermediarias"] = a[1] in ("on", "sim", "ligar")
-            salvar_config(cfg)
-        print(f"Passos intermediários: {'lidos' if cfg.get('intermediarias', True) else 'pulados (só a resposta final)'}")
-    elif cmd in ("conversas", "ouvir"):
-        ativas = conversas_ativas()
-        if cmd == "conversas" and len(a) > 1:
-            cfg["so_conversas_escolhidas"] = a[1] in ("on", "sim", "ligar")
-            salvar_config(cfg)
-        elif cmd == "ouvir" and len(a) > 1:
-            if a[1] == "nenhuma":
-                salvar_config(dict(cfg, conversas_ouvir=[]))
-            elif a[1] == "todas":
-                salvar_config(dict(cfg, conversas_ouvir=[c["id"] for c in ativas]))
+            cfg["progress_notes"] = turned_on(a)
+            save_config(cfg)
+        print(f"Progress notes: {'read' if cfg.get('progress_notes', True) else 'skipped (final answer only)'}")
+    elif cmd in ("conversations", "listen"):
+        active = active_conversations()
+        if cmd == "conversations" and len(a) > 1:
+            cfg["only_chosen_conversations"] = turned_on(a)
+            save_config(cfg)
+        elif cmd == "listen" and len(a) > 1:
+            if a[1] == "none":
+                save_config(dict(cfg, chosen_conversations=[]))
+            elif a[1] == "all":
+                save_config(dict(cfg, chosen_conversations=[c["id"] for c in active]))
             else:
-                alvo = next((c for i, c in enumerate(ativas, 1) if a[1] == str(i) or a[1] == c["id"]), None)
-                if not alvo:
-                    sys.exit(f"Conversa desconhecida: {a[1]}. Veja: tts conversas")
-                if not cfg["so_conversas_escolhidas"]:
-                    salvar_config(dict(cfg, so_conversas_escolhidas=True))
-                alternar_conversa(alvo["id"])
-        cfg = ler_config()
-        print("Modo: " + ("só as conversas escolhidas" if cfg["so_conversas_escolhidas"]
-                          else "todas as conversas (tts conversas on para escolher)"))
-        for i, c in enumerate(ativas, 1):
-            print(f"{'🔊' if c['id'] in cfg['conversas_ouvir'] else '  '} {i:>2}  {nome_conversa(c)}")
-        if not ativas:
-            print("(nenhuma conversa ativa agora)")
-    elif cmd == "selecao":
-        print(falar_selecao().capitalize() + ".")
-    elif cmd == "pausa":
-        print(alternar_pausa().capitalize() + ".")
-    elif cmd == "parar":
-        print("Parado." if parar() else "Nada tocando.")
-    elif cmd == "repetir":
-        if not repetir_ultimo():
-            sys.exit("Nada para repetir ainda.")
-    elif cmd == "chave":
-        print(guardar_chave_da_area_de_transferencia(a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else ""))
-    elif cmd == "diagnostico":
-        sys.exit(0 if diagnostico() else 1)
-    elif cmd == "autoteste":
-        import autoteste
-        sys.exit(0 if autoteste.main() else 1)
-    elif cmd == "agora":
-        print(falar_agora())
-    elif cmd == "testar":
-        enfileirar(FRASE_TESTE)
-        print(f"Falando com {cfg['voz']} a {cfg['velocidade']:.1f}x…")
-    elif cmd == "dizer":
-        enfileirar(" ".join(a[1:]) or sys.stdin.read())
+                target = next((c for i, c in enumerate(active, 1) if a[1] == str(i) or a[1] == c["id"]), None)
+                if not target:
+                    sys.exit(f"Unknown conversation: {a[1]}. See: tts conversations")
+                if not cfg["only_chosen_conversations"]:
+                    save_config(dict(cfg, only_chosen_conversations=True))
+                toggle_conversation(target["id"])
+        cfg = read_config()
+        print("Mode: " + ("only the chosen conversations" if cfg["only_chosen_conversations"]
+                          else "every conversation (tts conversations on to choose)"))
+        for i, c in enumerate(active, 1):
+            print(f"{'🔊' if c['id'] in cfg['chosen_conversations'] else '  '} {i:>2}  {conversation_name(c)}")
+        if not active:
+            print("(no active conversation right now)")
+    elif cmd == "selection":
+        print(speak_selection().capitalize() + ".")
+    elif cmd == "pause":
+        print(toggle_pause().capitalize() + ".")
+    elif cmd == "stop":
+        print("Stopped." if stop() else "Nothing playing.")
+    elif cmd == "repeat":
+        if not repeat_last():
+            sys.exit("Nothing to repeat yet.")
+    elif cmd == "key":
+        print(store_key_from_clipboard(a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else ""))
+    elif cmd == "doctor":
+        sys.exit(0 if doctor() else 1)
+    elif cmd == "selftest":
+        import selftest
+        sys.exit(0 if selftest.main() else 1)
+    elif cmd == "now":
+        print(speak_now())
+    elif cmd == "test":
+        enqueue(test_sentence(cfg))
+        print(f"Speaking with {cfg['voice']} in {current_language(cfg)} at {cfg['speed']:.1f}x…")
+    elif cmd == "say":
+        enqueue(" ".join(a[1:]) or sys.stdin.read())
     elif cmd == "log":
-        print("\n".join(LOG.read_text(encoding="utf-8").splitlines()[-20:]) if LOG.exists() else "(vazio)")
+        print("\n".join(LOG.read_text(encoding="utf-8").splitlines()[-20:]) if LOG.exists() else "(empty)")
     else:
         print(__doc__)
 
