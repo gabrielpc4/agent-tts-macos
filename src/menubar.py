@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Ícone na barra de menus para controlar o tts (voz, velocidade, liga/desliga)."""
+"""Menu bar icon to control tts (voice language, voice, speed, on/off)."""
 import os
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 import AppKit
 import rumps
@@ -13,15 +12,17 @@ from quickmachotkey.constants import kVK_ANSI_P, kVK_Escape, optionKey
 
 import tts
 
-ICONE_LIGADO, ICONE_FALANDO, ICONE_DESLIGADO, ICONE_PAUSADO = "🔊", "🗣️", "🔇", "⏸️"
-VELOCIDADES = [round(1.0 + i / 10, 1) for i in range(11)]  # 1.0 … 2.0
-MODELOS = {
-    "gemini-3.8-flash-tts": "Flash (melhor qualidade)",
-    "gemini-3.8-flash-lite-tts": "Flash-Lite (mais barato)",
+ICON_ON, ICON_SPEAKING, ICON_OFF, ICON_PAUSED = "🔊", "🗣️", "🔇", "⏸️"
+SPEEDS = [round(1.0 + i / 10, 1) for i in range(11)]  # 1.0 … 2.0
+MODELS = {
+    "gemini-3.8-flash-tts": "Flash (best quality)",
+    "gemini-3.8-flash-lite-tts": "Flash-Lite (cheaper)",
 }
+MODEL_SHORT_NAMES = {"gemini-3.8-flash-tts": "Flash", "gemini-3.8-flash-lite-tts": "Flash-Lite"}
+SYSTEM = ""  # the "language" value that follows the system language
 
 
-def falando() -> bool:
+def speaking() -> bool:
     try:
         os.kill(int(tts.PIDFILE.read_text(encoding="utf-8")), 0)
         return True
@@ -31,222 +32,246 @@ def falando() -> bool:
 
 class App(rumps.App):
     def __init__(self):
-        super().__init__("TTS Agentes", title=ICONE_LIGADO, quit_button=None)
-        cfg = tts.ler_config()
+        super().__init__("Agent TTS", title=ICON_ON, quit_button=None)
+        cfg = tts.read_config()
 
-        self.item_ativo = rumps.MenuItem("Leitura ligada", callback=self.alternar)
-        self.item_inter = rumps.MenuItem("Ler passos intermediários", callback=self.alternar_inter)
-        self.item_sub = rumps.MenuItem("Ler subagentes do Codex", callback=self.alternar_sub)
+        self.menu_language = rumps.MenuItem("Voice language")
+        system_name = tts.LANGUAGES[tts.system_language()]["name"]
+        system = rumps.MenuItem(f"System language ({system_name})", callback=self.change_language)
+        system.language = SYSTEM
+        self.menu_language.add(system)
+        self.menu_language.add(rumps.separator)
+        for code, language in tts.LANGUAGES.items():
+            item = rumps.MenuItem(language["name"], callback=self.change_language)
+            item.language = code
+            self.menu_language.add(item)
+
+        self.item_enabled = rumps.MenuItem("Reading on", callback=self.toggle)
+        self.item_progress = rumps.MenuItem("Read progress notes", callback=self.toggle_progress)
+        self.item_subagents = rumps.MenuItem("Read Codex subagents", callback=self.toggle_subagents)
         self.item_status = rumps.MenuItem("")
 
-        self.menu_voz = rumps.MenuItem("Voz")
-        for grupo, filtro in (("Femininas", "feminina"), ("Masculinas", "masculina")):
-            self.menu_voz.add(rumps.MenuItem(grupo))
-            for nome, desc in tts.VOZES_GEMINI.items():
-                if desc.startswith(filtro):
-                    item = rumps.MenuItem(f"{nome} — {desc.split(', ')[1]}", callback=self.trocar_voz)
-                    item.voz = nome
-                    self.menu_voz.add(item)
-            self.menu_voz.add(rumps.separator)
+        self.menu_voice = rumps.MenuItem("Voice")
+        for group, gender in (("Female", "female"), ("Male", "male")):
+            self.menu_voice.add(rumps.MenuItem(group))
+            for name, (voice_gender, description) in tts.GEMINI_VOICES.items():
+                if voice_gender == gender:
+                    item = rumps.MenuItem(f"{name} — {description}", callback=self.change_voice)
+                    item.voice = name
+                    self.menu_voice.add(item)
+            self.menu_voice.add(rumps.separator)
 
-        self.menu_vel = rumps.MenuItem("Velocidade")
-        for v in VELOCIDADES:
-            item = rumps.MenuItem(f"{v:.1f}x" + ("  (rápida base)" if v == 1.0 else ""),
-                                  callback=self.trocar_velocidade)
-            item.vel = v
-            self.menu_vel.add(item)
+        self.menu_speed = rumps.MenuItem("Speed")
+        for v in SPEEDS:
+            item = rumps.MenuItem(f"{v:.1f}x" + ("  (base fast pace)" if v == 1.0 else ""),
+                                  callback=self.change_speed)
+            item.speed = v
+            self.menu_speed.add(item)
 
-        self.menu_conversas = rumps.MenuItem("Conversas")
-        self.menu_conversas.add(rumps.MenuItem("…"))  # o rumps só cria o submenu ao receber o primeiro item
-        self.assinatura_conversas = None
+        self.menu_conversations = rumps.MenuItem("Conversations")
+        self.menu_conversations.add(rumps.MenuItem("…"))  # rumps only creates the submenu when it gets a first item
+        self.conversations_signature = None
 
-        self.menu_modelo = rumps.MenuItem("Modelo Gemini")
-        for mid, desc in MODELOS.items():
-            item = rumps.MenuItem(desc, callback=self.trocar_modelo)
-            item.modelo = mid
-            self.menu_modelo.add(item)
+        self.menu_model = rumps.MenuItem("Gemini model")
+        for model_id, description in MODELS.items():
+            item = rumps.MenuItem(description, callback=self.change_model)
+            item.model = model_id
+            self.menu_model.add(item)
 
         self.menu = [
-            rumps.MenuItem("Falar seleção  (⌥Esc)", callback=self.falar_selecao),
-            rumps.MenuItem("Pausar / continuar  (⌥P)", callback=self.pausar),
-            rumps.MenuItem("Falar agora", callback=self.falar_agora),
-            self.item_ativo,
-            self.item_inter,
-            self.item_sub,
-            self.menu_conversas,
-            rumps.MenuItem("Parar fala", callback=self.parar, key="."),
-            rumps.MenuItem("Repetir última", callback=self.repetir, key="r"),
-            rumps.MenuItem("Testar voz", callback=self.testar, key="t"),
+            self.menu_language,
             None,
-            self.menu_voz,
-            self.menu_vel,
-            self.menu_modelo,
+            rumps.MenuItem("Speak selection  (⌥Esc)", callback=self.speak_selection),
+            rumps.MenuItem("Pause / resume  (⌥P)", callback=self.pause),
+            rumps.MenuItem("Speak now", callback=self.speak_now),
+            self.item_enabled,
+            self.item_progress,
+            self.item_subagents,
+            self.menu_conversations,
+            rumps.MenuItem("Stop speaking", callback=self.stop, key="."),
+            rumps.MenuItem("Repeat last", callback=self.repeat, key="r"),
+            rumps.MenuItem("Test voice", callback=self.test, key="t"),
+            None,
+            self.menu_voice,
+            self.menu_speed,
+            self.menu_model,
             None,
             self.item_status,
-            rumps.MenuItem("Abrir log", callback=self.abrir_log),
-            rumps.MenuItem("Sair", callback=rumps.quit_application),
+            rumps.MenuItem("Open log", callback=self.open_log),
+            rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
-        self.atualizar_marcas(cfg)
-        self.aviso, self.aviso_ate = "", 0.0
-        rumps.Timer(self.tique, 1).start()
+        self.update_marks(cfg)
+        self.notice, self.notice_until = "", 0.0
+        rumps.Timer(self.tick, 1).start()
 
-    # ------------------------------------------------------------ estado visual
+    # ------------------------------------------------------------ visual state
 
-    def atualizar_marcas(self, cfg=None):
-        cfg = cfg or tts.ler_config()
-        self.item_ativo.state = int(cfg["ativo"])
-        self.item_inter.state = int(cfg.get("intermediarias", True))
-        self.item_sub.state = int(cfg.get("subagentes_codex", False))
-        for item in self.menu_voz.values():
-            if hasattr(item, "voz"):
-                item.state = int(item.voz == cfg["voz"])
-        for item in self.menu_vel.values():
-            item.state = int(abs(item.vel - cfg["velocidade"]) < 0.01)
-        for item in self.menu_modelo.values():
-            item.state = int(item.modelo == cfg["modelo"])
-        self.menu_voz.title = f"Voz: {cfg['voz']}"
-        self.menu_vel.title = f"Velocidade: {cfg['velocidade']:.1f}x"
-        self.atualizar_conversas(cfg)
+    def update_marks(self, cfg=None):
+        cfg = cfg or tts.read_config()
+        language = tts.current_language(cfg)
+        for item in self.menu_language.values():
+            if hasattr(item, "language"):
+                item.state = int(item.language == (cfg.get("language") or SYSTEM))
+        self.menu_language.title = f"Voice language: {tts.LANGUAGES[language]['name']}"
+        self.item_enabled.state = int(cfg["enabled"])
+        self.item_progress.state = int(cfg.get("progress_notes", True))
+        self.item_subagents.state = int(cfg.get("codex_subagents", False))
+        for item in self.menu_voice.values():
+            if hasattr(item, "voice"):
+                item.state = int(item.voice == cfg["voice"])
+        for item in self.menu_speed.values():
+            item.state = int(abs(item.speed - cfg["speed"]) < 0.01)
+        for item in self.menu_model.values():
+            item.state = int(item.model == cfg["model"])
+        self.menu_voice.title = f"Voice: {cfg['voice']}"
+        self.menu_speed.title = f"Speed: {cfg['speed']:.1f}x"
+        self.update_conversations(cfg)
 
-    def atualizar_conversas(self, cfg):
-        """Refaz o submenu só quando a lista ou as marcas mudam (refazer com o menu aberto o pisca)."""
-        ativas = tts.conversas_ativas()
-        escolhidas = cfg.get("conversas_ouvir", [])
-        so = cfg.get("so_conversas_escolhidas", False)
-        assinatura = (so, tuple((c["id"], tts.nome_conversa(c), c["id"] in escolhidas) for c in ativas))
-        total = sum(c["id"] in escolhidas for c in ativas)
-        self.menu_conversas.title = f"Conversas: {total} de {len(ativas)}" if so else "Conversas: todas"
-        if assinatura == self.assinatura_conversas:
+    def update_conversations(self, cfg):
+        """Rebuilds the submenu only when the list or the marks change (rebuilding it while open makes it flicker)."""
+        active = tts.active_conversations()
+        chosen = cfg.get("chosen_conversations", [])
+        only = cfg.get("only_chosen_conversations", False)
+        signature = (only, tuple((c["id"], tts.conversation_name(c), c["id"] in chosen) for c in active))
+        total = sum(c["id"] in chosen for c in active)
+        self.menu_conversations.title = f"Conversations: {total} of {len(active)}" if only else "Conversations: all"
+        if signature == self.conversations_signature:
             return
-        self.assinatura_conversas = assinatura
-        # O rumps guarda todo item criado num dicionário de classe (NSApp._ns_to_py_and_callback) e o
-        # clear() não tira de lá: sem isto, cada vez que o submenu era refeito os itens antigos ficavam
-        # na memória para sempre (1,3 milhão de NSMenuItem e 2 GB depois de 29 horas).
-        registro = rumps.rumps.NSApp._ns_to_py_and_callback
-        for item in self.menu_conversas.values():
-            registro.pop(getattr(item, "_menuitem", None), None)
-        self.menu_conversas.clear()
-        filtro = rumps.MenuItem("Ouvir só as escolhidas", callback=self.alternar_filtro)
-        filtro.state = int(so)
-        self.menu_conversas.add(filtro)
-        self.menu_conversas.add(rumps.separator)
-        if not ativas:
-            self.menu_conversas.add(rumps.MenuItem("(nenhuma conversa ativa agora)"))
-        for c in ativas:
-            item = rumps.MenuItem(tts.nome_conversa(c), callback=self.alternar_conversa)
-            item.conversa = c["id"]
-            item.state = int(c["id"] in escolhidas)
-            self.menu_conversas.add(item)
+        self.conversations_signature = signature
+        # rumps keeps every item it creates in a class dictionary (NSApp._ns_to_py_and_callback) and clear()
+        # doesn't remove them from it: without this, each rebuild of the submenu kept the old items in memory
+        # forever (1.3 million NSMenuItem and 2 GB after 29 hours).
+        registry = rumps.rumps.NSApp._ns_to_py_and_callback
+        for item in self.menu_conversations.values():
+            registry.pop(getattr(item, "_menuitem", None), None)
+        self.menu_conversations.clear()
+        only_chosen = rumps.MenuItem("Hear only the chosen ones", callback=self.toggle_only_chosen)
+        only_chosen.state = int(only)
+        self.menu_conversations.add(only_chosen)
+        self.menu_conversations.add(rumps.separator)
+        if not active:
+            self.menu_conversations.add(rumps.MenuItem("(no active conversation right now)"))
+        for c in active:
+            item = rumps.MenuItem(tts.conversation_name(c), callback=self.toggle_conversation)
+            item.conversation = c["id"]
+            item.state = int(c["id"] in chosen)
+            self.menu_conversations.add(item)
 
-    def tique(self, _):
-        cfg = tts.ler_config()
-        self.title = (ICONE_PAUSADO if tts.PAUSADO.exists() else ICONE_DESLIGADO if not cfg["ativo"]
-                      else ICONE_FALANDO if falando() else ICONE_LIGADO)
-        if time.time() < self.aviso_ate:
-            self.item_status.title = self.aviso
-        elif (tts.BASE / "sem-tts-gemini").exists():
-            self.item_status.title = "⚠️ Sem chave do Gemini no chaveiro de login: usando Microsoft"
-        elif pausas := [(mod, ate) for mod in tts.MODELOS_GEMINI if (ate := tts.pausa_ate(mod))]:
-            nomes = {"gemini-3.8-flash-tts": "Flash", "gemini-3.8-flash-lite-tts": "Flash-Lite"}
-            reserva = "Microsoft" if len(pausas) == len(tts.MODELOS_GEMINI) else \
-                next(nomes[mod] for mod in tts.MODELOS_GEMINI if mod not in dict(pausas))
-            mod, ate = pausas[0]
-            self.item_status.title = (f"⚠️ {nomes[mod]} no limite diário até "
-                                      f"{time.strftime('%H:%M', time.localtime(ate))}, usando {reserva}")
+    def tick(self, _):
+        cfg = tts.read_config()
+        self.title = (ICON_PAUSED if tts.PAUSED.exists() else ICON_OFF if not cfg["enabled"]
+                      else ICON_SPEAKING if speaking() else ICON_ON)
+        if time.time() < self.notice_until:
+            self.item_status.title = self.notice
+        elif (tts.BASE / "no-key-tts-gemini").exists():
+            self.item_status.title = "⚠️ No Gemini key in the login keychain: using Microsoft"
+        elif pauses := [(model, until) for model in tts.GEMINI_MODELS if (until := tts.paused_until(model))]:
+            fallback = "Microsoft" if len(pauses) == len(tts.GEMINI_MODELS) else \
+                next(MODEL_SHORT_NAMES[m] for m in tts.GEMINI_MODELS if m not in dict(pauses))
+            model, until = pauses[0]
+            self.item_status.title = (f"⚠️ {MODEL_SHORT_NAMES[model]} at its daily limit until "
+                                      f"{time.strftime('%H:%M', time.localtime(until))}, using {fallback}")
         else:
-            fila = len(list(tts.FILA.glob("*.txt"))) if tts.FILA.exists() else 0
-            self.item_status.title = f"Gemini ok · na fila: {fila}"
-        self.atualizar_marcas(cfg)
+            queued = len(list(tts.QUEUE.glob("*.txt"))) if tts.QUEUE.exists() else 0
+            self.item_status.title = f"Gemini ok · queued: {queued}"
+        self.update_marks(cfg)
 
-    # ------------------------------------------------------------ ações
+    # ------------------------------------------------------------ actions
 
-    def salvar(self, **mudancas):
-        cfg = tts.ler_config()
-        cfg.update(mudancas)
-        tts.salvar_config(cfg)
-        self.atualizar_marcas(cfg)
+    def save(self, **changes):
+        cfg = tts.read_config()
+        cfg.update(changes)
+        tts.save_config(cfg)
+        self.update_marks(cfg)
 
-    def alternar(self, _):
-        ativo = not tts.ler_config()["ativo"]
-        self.salvar(ativo=ativo)
-        if not ativo:
-            threading.Thread(target=tts.parar, daemon=True).start()
+    def introduce(self):
+        """Plays the test sentence with the new setting, interrupting what was playing."""
+        def run():
+            tts.stop()
+            tts.enqueue(tts.test_sentence())
+        threading.Thread(target=run, daemon=True).start()
 
-    def alternar_inter(self, _):
-        self.salvar(intermediarias=not tts.ler_config().get("intermediarias", True))
+    def change_language(self, item):
+        self.save(language=item.language)
+        self.introduce()
 
-    def alternar_sub(self, _):
-        self.salvar(subagentes_codex=not tts.ler_config().get("subagentes_codex", False))
+    def toggle(self, _):
+        enabled = not tts.read_config()["enabled"]
+        self.save(enabled=enabled)
+        if not enabled:
+            threading.Thread(target=tts.stop, daemon=True).start()
 
-    def alternar_filtro(self, _):
-        self.salvar(so_conversas_escolhidas=not tts.ler_config().get("so_conversas_escolhidas", False))
+    def toggle_progress(self, _):
+        self.save(progress_notes=not tts.read_config().get("progress_notes", True))
 
-    def alternar_conversa(self, item):
-        if not tts.ler_config().get("so_conversas_escolhidas"):
-            self.salvar(so_conversas_escolhidas=True)  # escolher uma conversa só faz sentido no modo "só as escolhidas"
-        tts.alternar_conversa(item.conversa)
-        self.atualizar_marcas()
+    def toggle_subagents(self, _):
+        self.save(codex_subagents=not tts.read_config().get("codex_subagents", False))
 
-    def trocar_voz(self, item):
-        self.salvar(voz=item.voz)
+    def toggle_only_chosen(self, _):
+        self.save(only_chosen_conversations=not tts.read_config().get("only_chosen_conversations", False))
 
-        def apresentar():
-            tts.parar()
-            tts.enfileirar(f"Oi! Agora quem fala é a voz {item.voz}. O deploy e o build estão prontos.")
-        threading.Thread(target=apresentar, daemon=True).start()
+    def toggle_conversation(self, item):
+        if not tts.read_config().get("only_chosen_conversations"):
+            self.save(only_chosen_conversations=True)  # choosing a conversation only makes sense in "only the chosen"
+        tts.toggle_conversation(item.conversation)
+        self.update_marks()
 
-    def trocar_velocidade(self, item):
-        self.salvar(velocidade=item.vel)
-        self.repetir(None)  # ouve na hora, sem gastar API
+    def change_voice(self, item):
+        self.save(voice=item.voice)
+        self.introduce()
 
-    def trocar_modelo(self, item):
-        self.salvar(modelo=item.modelo)
+    def change_speed(self, item):
+        self.save(speed=item.speed)
+        self.repeat(None)  # hear it right away, without spending API
 
-    def parar(self, _):
-        threading.Thread(target=tts.parar, daemon=True).start()
+    def change_model(self, item):
+        self.save(model=item.model)
 
-    def repetir(self, _):
-        threading.Thread(target=tts.repetir_ultimo, daemon=True).start()
+    def stop(self, _):
+        threading.Thread(target=tts.stop, daemon=True).start()
 
-    def falar_selecao(self, _):
-        threading.Thread(target=tts.falar_selecao, daemon=True).start()
+    def repeat(self, _):
+        threading.Thread(target=tts.repeat_last, daemon=True).start()
 
-    def pausar(self, _):
-        threading.Thread(target=tts.alternar_pausa, daemon=True).start()
+    def speak_selection(self, _):
+        threading.Thread(target=tts.speak_selection, daemon=True).start()
 
-    def falar_agora(self, _):
-        def buscar():
-            self.aviso = tts.falar_agora()
-            self.aviso_ate = time.time() + 6
-        threading.Thread(target=buscar, daemon=True).start()
+    def pause(self, _):
+        threading.Thread(target=tts.toggle_pause, daemon=True).start()
 
-    def testar(self, _):
-        tts.enfileirar(tts.FRASE_TESTE)
+    def speak_now(self, _):
+        def find():
+            self.notice = tts.speak_now()
+            self.notice_until = time.time() + 6
+        threading.Thread(target=find, daemon=True).start()
 
-    def abrir_log(self, _):
+    def test(self, _):
+        tts.enqueue(tts.test_sentence())
+
+    def open_log(self, _):
         tts.LOG.touch()
         subprocess.run(["open", "-a", "TextEdit", str(tts.LOG)])
 
 
 @quickHotKey(virtualKey=kVK_ANSI_P, modifierMask=mask(optionKey))
-def atalho_pausa() -> None:
-    """⌥P em qualquer app: pausa ou continua a fala."""
-    threading.Thread(target=tts.alternar_pausa, daemon=True).start()
+def pause_shortcut() -> None:
+    """⌥P in any app: pause or resume speech."""
+    threading.Thread(target=tts.toggle_pause, daemon=True).start()
 
 
 @quickHotKey(virtualKey=kVK_Escape, modifierMask=mask(optionKey))
-def atalho_selecao() -> None:
-    """⌥Esc em qualquer app: lê a seleção com a voz da ferramenta (ou para, se já estiver falando)."""
-    threading.Thread(target=tts.falar_selecao, daemon=True).start()
+def selection_shortcut() -> None:
+    """⌥Esc in any app: read the selection with this app's voice (or stop, if it is already speaking)."""
+    threading.Thread(target=tts.speak_selection, daemon=True).start()
 
 
 if __name__ == "__main__":
-    # ao abrir (login ou reinício), começa desligada e sem pausa pendurada
-    tts.salvar_config(dict(tts.ler_config(), ativo=False))
-    tts.PAUSADO.unlink(missing_ok=True)
+    # on launch (login or restart) it starts off and without a leftover pause
+    tts.save_config(dict(tts.read_config(), enabled=False))
+    tts.PAUSED.unlink(missing_ok=True)
     import ApplicationServices
     if not ApplicationServices.AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True}):
-        tts.log("menubar sem permissão de acessibilidade: Falar seleção vai pedir no primeiro uso")
+        tts.log("menu bar without accessibility permission: Speak selection will ask on first use")
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
-        AppKit.NSApplicationActivationPolicyAccessory)  # sem ícone no Dock
+        AppKit.NSApplicationActivationPolicyAccessory)  # no Dock icon
     App().run()
