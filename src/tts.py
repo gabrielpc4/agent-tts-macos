@@ -126,7 +126,7 @@ def salvar_config(cfg: dict) -> None:
 def log(msg: str) -> None:
     try:
         if LOG.exists() and LOG.stat().st_size > 200_000:
-            LOG.write_text(LOG.read_text(encoding="utf-8")[-50_000:])
+            LOG.write_text(LOG.read_text(encoding="utf-8")[-50_000:], encoding="utf-8")
         with LOG.open("a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
@@ -332,11 +332,12 @@ def produzir(segmentos: list[str], cfg: dict, entregar) -> str:
     Gemini (até 2 tentativas) → Microsoft → say. Se o Gemini falhar depois de já ter
     entregado áudio daquela parte, não repete a parte em outra voz."""
     motores = []
+    tem_chave = bool(chave("tts-gemini"))  # sem chave, cada tentativa no Gemini só atrasava a voz reserva
     for i, segmento in enumerate(segmentos, 1):
         motor = None
         preferido = cfg["modelo"]
         for modelo in [preferido] + [m for m in MODELOS_GEMINI if m != preferido]:
-            if motor or gemini_pausado(modelo):
+            if motor or not tem_chave or gemini_pausado(modelo):
                 continue
             for tentativa in (1, 2):
                 recebeu = False
@@ -762,9 +763,11 @@ def e_narracao(bloco: dict) -> bool:
         return False
 
 
-def textos_turno_claude(caminho: str) -> list[str]:
-    """Blocos de texto do assistente no turno atual (desde a última mensagem real do usuário)."""
+def textos_turno_claude(caminho: str) -> tuple[str | None, list[str]]:
+    """Id do turno atual (o uuid da última mensagem real do usuário; None se ela já saiu da cauda lida)
+    e os blocos de texto do assistente desde ela."""
     textos: list[str] = []
+    turno = None
     for e in reversed(ler_cauda(caminho)):
         conteudo = (e.get("message") or {}).get("content")
         if e.get("type") == "assistant" and isinstance(conteudo, list):
@@ -773,8 +776,9 @@ def textos_turno_claude(caminho: str) -> list[str]:
         elif e.get("type") == "user" and not e.get("isMeta"):
             if isinstance(conteudo, str) or (isinstance(conteudo, list) and any(
                     c.get("type") == "text" for c in conteudo)):
+                turno = e.get("uuid") or e.get("timestamp")
                 break
-    return [t for t in textos if t.strip()]
+    return turno, [t for t in textos if t.strip()]
 
 
 def e_subagente_codex(caminho: str) -> bool:
@@ -788,31 +792,46 @@ def e_subagente_codex(caminho: str) -> bool:
     return meta.get("thread_source") == "subagent" or (isinstance(origem, dict) and "subagent" in origem)
 
 
-def textos_turno_codex(caminho: str) -> list[str]:
-    """Mensagens do assistente no turno atual (desde o último task_started)."""
+def textos_turno_codex(caminho: str) -> tuple[str | None, list[str]]:
+    """Id do turno atual (turn_id do último task_started; None se ele já saiu da cauda lida)
+    e as mensagens do assistente desde ele."""
     textos: list[str] = []
+    turno = None
     for e in reversed(ler_cauda(caminho)):
         p = e.get("payload") or {}
         if e.get("type") == "event_msg" and p.get("type") == "task_started":
+            turno = p.get("turn_id") or e.get("timestamp")
             break
         if e.get("type") == "response_item" and p.get("type") == "message" \
                 and p.get("role") == "assistant" and p.get("phase") != "final_answer":
             textos = [c.get("text", "") for c in p.get("content", [])
                       if c.get("type") == "output_text"] + textos
-    return [t for t in textos if t.strip()]
+    return turno, [t for t in textos if t.strip()]
 
 
-def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
-    """Filtra o que já foi falado nesta sessão (evita repetir entre PostToolUse e Stop)."""
+def so_os_novos(sessao: str, turno: str | None, textos: list[str]) -> list[str]:
+    """Filtra o que já foi falado neste turno (evita repetir entre PostToolUse e Stop). Um turno novo
+    começa do zero: a mesma resposta ("Pronto.") num turno seguinte é falada de novo.
+    turno None (início do turno fora da cauda lida) mantém o turno guardado: trocar de turno ali faria
+    a cauda inteira ser falada de novo."""
     ESTADO.mkdir(parents=True, exist_ok=True)
     for velho in ESTADO.glob("*.json"):
-        if time.time() - velho.stat().st_mtime > 3 * 86400:
-            velho.unlink(missing_ok=True)
+        try:
+            if time.time() - velho.stat().st_mtime > 3 * 86400:
+                velho.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass  # outro hook apagou ao mesmo tempo
     arq = ESTADO / (re.sub(r"[^\w-]", "_", sessao) + ".json")
     with TravaArquivo(BASE / "estado.lock"):
         try:
-            vistos = set(json.loads(arq.read_text(encoding="utf-8")))
+            salvo = json.loads(arq.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
+            salvo = {}
+        if isinstance(salvo, list):  # formato antigo (só os hashes, sem turno): vale para o turno atual
+            salvo = {"turno": turno, "vistos": salvo}
+        turno_salvo = salvo.get("turno") if isinstance(salvo, dict) else None
+        vistos = set(salvo.get("vistos", [])) if isinstance(salvo, dict) else set()
+        if turno is not None and turno != turno_salvo:
             vistos = set()
         novos = []
         for t in textos:
@@ -820,7 +839,8 @@ def so_os_novos(sessao: str, textos: list[str]) -> list[str]:
             if h not in vistos:
                 vistos.add(h)
                 novos.append(t)
-        arq.write_text(json.dumps(sorted(vistos)), encoding="utf-8")
+        arq.write_text(json.dumps({"turno": turno if turno is not None else turno_salvo,
+                                   "vistos": sorted(vistos)}), encoding="utf-8")
     return novos
 
 
@@ -945,10 +965,13 @@ def hook(origem: str, evento: str) -> None:
     transcript = dados.get("transcript_path") or ""
     final = ""
     if origem == "cursor":
+        # cada afterAgentResponse é uma resposta: o generation_id separa um turno do outro
+        turno = dados.get("generation_id") or None
         intermediarias, final = [], dados.get("text") or ""
     else:
-        intermediarias = (textos_turno_claude if origem == "claude" else textos_turno_codex)(
-            transcript) if transcript else []
+        turno, intermediarias = (textos_turno_claude if origem == "claude" else textos_turno_codex)(
+            transcript) if transcript else (None, [])
+        turno = turno or dados.get("turn_id") or None
         if evento == "stop":
             final = dados.get("last_assistant_message") or (intermediarias[-1] if intermediarias else "")
             final_limpo = limpar(final, 10_000)[:200]
@@ -956,7 +979,7 @@ def hook(origem: str, evento: str) -> None:
                               if not final_limpo or not limpar(t, 10_000).startswith(final_limpo[:150])]
     if not cfg.get("intermediarias", True):
         intermediarias = []
-    novos = so_os_novos(sessao, [t for t in intermediarias + [final] if t.strip()])
+    novos = so_os_novos(sessao, turno, [t for t in intermediarias + [final] if t.strip()])
     if not conversa_ouvida(cfg, f"{origem}:{sessao}"):
         return  # conversa não escolhida: o que ela disse conta como visto, para não vir de uma vez ao escolhê-la
     for t in novos:
