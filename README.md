@@ -92,7 +92,7 @@ agent hook ──► tts.py hook ──► queue (~/.tts-agentes/fila) ──►
 
 Claude Code's desktop app saves some progress notes as "narration" blocks; those are read too, while real reasoning blocks never are.
 
-Long texts are split into ~1500-character parts and streamed back to back. Gemini rate limits (HTTP 429) pause Gemini automatically and the fallback voice is used meanwhile; the menu shows it.
+Long texts are split into ~3000-character parts and streamed back to back. Gemini rate limits (HTTP 429) pause Gemini automatically and the fallback voice is used meanwhile; the menu shows it.
 
 ## Configuration
 
