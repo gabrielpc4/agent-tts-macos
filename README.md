@@ -88,11 +88,11 @@ agent hook ──► tts.py hook ──► queue (~/.agent-tts/queue) ──► 
 
 | Tool | Progress notes | Final answer |
 |---|---|---|
-| Claude Code | `PostToolUse` hook reads new assistant text from the transcript | `Stop` hook (`last_assistant_message`) |
-| Codex | `PostToolUse` hook reads the rollout transcript | `Stop` hook |
+| Claude Code | `PreToolUse` and `PostToolUse` hooks read new assistant text from the transcript | `Stop` hook (`last_assistant_message`) |
+| Codex | `PreToolUse` and `PostToolUse` hooks read the rollout transcript | `Stop` hook |
 | Cursor | — | `afterAgentResponse` hook |
 
-Each text is spoken once per turn: the `PostToolUse` and `Stop` hooks see the same texts, and only the new ones are queued. The same reply in a later turn is spoken again.
+A progress note is queued as soon as the next tool starts (`PreToolUse`), not when it finishes, so a long command doesn't hold the note back until the agent has already written the next one. `PostToolUse` catches a note that reached the transcript late. Each text is spoken once per turn: these hooks and `Stop` see the same texts, and only the new ones are queued. The same reply in a later turn is spoken again.
 
 Claude Code's desktop app saves some progress notes as "narration" blocks; those are read too, while real reasoning blocks never are.
 

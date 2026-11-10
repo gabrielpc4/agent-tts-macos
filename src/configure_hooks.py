@@ -72,6 +72,9 @@ def main(action: str) -> None:
 
     configure(HOME / ".claude/settings.json", {
         "Stop": claude("stop"),
+        # PreToolUse speaks the note written before a tool as soon as the tool starts; PostToolUse only fires when
+        # it ends (minutes for a long command) and stays as a catch-up for text flushed late to the transcript.
+        "PreToolUse": {"matcher": "*", **claude("tool")},
         "PostToolUse": {"matcher": "*", **claude("tool")},
         "SessionEnd": claude("end"),  # removes the conversation from the menu list
     } if install else {})
@@ -79,6 +82,7 @@ def main(action: str) -> None:
     if (HOME / ".codex").exists():
         configure(HOME / ".codex/hooks.json", {
             "Stop": codex("stop"),
+            "PreToolUse": codex("tool"),
             "PostToolUse": codex("tool"),
         } if install else {})
     if (HOME / ".cursor").exists():

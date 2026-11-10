@@ -940,7 +940,7 @@ def codex_turn_texts(path: str) -> tuple[str | None, list[str]]:
 
 
 def only_new(session: str, turn: str | None, texts: list[str]) -> list[str]:
-    """Filters out what was already spoken in this turn (avoids repeating between PostToolUse and Stop). A new
+    """Filters out what was already spoken in this turn (avoids repeating between PreToolUse, PostToolUse and Stop). A new
     turn starts from scratch: the same reply ("Done.") in a later turn is spoken again.
     turn None (turn start outside the tail read) keeps the stored turn: switching turns there would make the
     whole tail be spoken again."""
@@ -1069,6 +1069,10 @@ def conversation_name(c: dict) -> str:
     return f"{name}{folder}  ({c['source'].capitalize()})"
 
 
+PENDING = BASE / "pending_hooks"
+FLUSH_WAIT = 30.0
+
+
 def hook(source: str, event: str) -> None:
     try:
         data = json.loads(sys.stdin.read() or "{}")
@@ -1077,6 +1081,45 @@ def hook(source: str, event: str) -> None:
     if source in ("codex", "cursor"):
         print("{}")  # Codex requires JSON on stdout; Cursor accepts it
         sys.stdout.flush()
+    if data.get("hook_event_name") == "PreToolUse" and data.get("tool_use_id") and data.get("transcript_path") \
+            and not unattended_session():
+        # PreToolUse runs before the app appends the assistant message (note + tool call) to the transcript, and
+        # waiting here would hold the tool back: a detached process waits for the flush instead.
+        PENDING.mkdir(parents=True, exist_ok=True)
+        file = PENDING / f"{time.time_ns()}.json"
+        file.write_text(json.dumps(data), encoding="utf-8")
+        platform_support.start_detached([str(PYTHON), str(Path(__file__).resolve()), "_hook_after_flush",
+                                         source, event, str(file)])
+        return
+    handle_hook(source, event, data)
+
+
+def hook_after_flush(source: str, event: str, file: str) -> None:
+    path = Path(file)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    finally:
+        path.unlink(missing_ok=True)
+    needle = str(data["tool_use_id"]).encode()
+    deadline = time.time() + FLUSH_WAIT
+    while time.time() < deadline:
+        try:
+            with open(data["transcript_path"], "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 1_000_000))
+                if needle in f.read():
+                    break
+        except OSError:
+            return
+        time.sleep(0.1)
+    else:
+        return  # never flushed (or another format): PostToolUse still reads the note
+    handle_hook(source, event, data)
+
+
+def handle_hook(source: str, event: str, data: dict) -> None:
     session = str(data.get("session_id") or data.get("conversation_id") or source)
     if event == "end" or unattended_session():
         # end of the session (SessionEnd), or a run nobody is watching: leaves the list and never speaks
@@ -1401,6 +1444,8 @@ def main() -> None:
         worker()
     elif cmd == "hook":
         hook(a[1] if len(a) > 1 else "claude", a[2] if len(a) > 2 else "stop")
+    elif cmd == "_hook_after_flush":
+        hook_after_flush(a[1], a[2], a[3])
     elif cmd == "status":
         status(cfg)
     elif cmd in ("on", "off"):
